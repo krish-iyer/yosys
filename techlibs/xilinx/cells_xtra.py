@@ -205,7 +205,7 @@ CELLS = [
     # Cell('DSP48', port_attrs={'CLK': ['clkbuf_sink']}), # Virtex 4
     Cell('DSP48E', port_attrs={'CLK': ['clkbuf_sink']}), # Virtex 5
     #Cell('DSP48E1', port_attrs={'CLK': ['clkbuf_sink']}), # Virtex 6 / Series 7
-    Cell('DSP48E2', port_attrs={'CLK': ['clkbuf_sink']}), # Ultrascale
+    #Cell('DSP48E2', port_attrs={'CLK': ['clkbuf_sink']}), # Ultrascale (in cells_sim.v)
 
     # I/O logic.
     # Virtex 2, Spartan 3.

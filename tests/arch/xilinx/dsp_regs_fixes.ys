@@ -1,0 +1,113 @@
+# Regression tests for xilinx_dsp register packing corner cases. Each design
+# used to be silently miscompiled; check equivalence against the DSP48E1
+# simulation model and that the offending register stays out of the DSP.
+
+read_verilog <<EOT
+// (1) PREG cannot hold a non-zero synchronous reset value
+module preg_rstval(input clk, rst, input signed [7:0] a, b, output reg signed [15:0] p);
+  reg signed [7:0] ar, br;
+  always @(posedge clk) begin
+    ar <= a; br <= b;
+    if (rst) p <= 16'sd5; else p <= ar * br;
+  end
+endmodule
+
+// (2) MREG cannot hold a non-zero synchronous reset value
+module mreg_rstval(input clk, rst, input signed [7:0] a, b, output reg signed [15:0] p);
+  reg signed [7:0] ar, br; reg signed [15:0] m;
+  always @(posedge clk) begin
+    ar <= a; br <= b;
+    if (rst) m <= 16'h00f0; else m <= ar * br;
+    p <= m;
+  end
+endmodule
+
+// (3) the AD (pre-adder) register reset must be kept (it is RSTD)
+module adreg_rst(input clk, rst, input signed [7:0] a, d, b, output signed [16:0] p);
+  reg signed [8:0] ad;
+  always @(posedge clk) if (rst) ad <= 0; else ad <= a + d;
+  assign p = ad * b;
+endmodule
+
+// (4) DREG and ADREG share RSTD: a reset only on the D register must not
+//     reset the AD register
+module dreg_rst_adreg_norst(input clk, rst, input signed [7:0] a, d, b, output reg signed [16:0] p);
+  reg signed [7:0] ar, dr, br, br2; reg signed [8:0] ad;
+  always @(posedge clk) begin
+    ar <= a; br <= b; br2 <= br;
+    if (rst) dr <= 0; else dr <= d;
+    ad <= ar + dr;
+    p <= ad * br2;
+  end
+endmodule
+
+// (5) registers wider than the DSP result whose upper bits are sign
+//     extension: absorbing only the low bits into PREG used to leave the
+//     upper bits undriven
+module preg_signext(input clk, input signed [7:0] a0, a1, b0, b1, output signed [23:0] y);
+  reg signed [7:0] a0r, a1r, a1rr, b0r, b1r, b1rr;
+  reg signed [15:0] m0, m1; reg signed [23:0] p0, p1;
+  always @(posedge clk) begin
+    a0r <= a0; b0r <= b0; a1r <= a1; b1r <= b1; a1rr <= a1r; b1rr <= b1r;
+    m0 <= a0r * b0r; m1 <= a1rr * b1rr;
+    p0 <= m0; p1 <= p0 + m1;
+  end
+  assign y = p1;
+endmodule
+EOT
+design -save read
+
+design -load read
+hierarchy -top preg_rstval
+proc
+equiv_opt -run :prove -map +/xilinx/cells_sim.v synth_xilinx -noiopad
+miter -equiv -flatten -make_assert -make_outputs gold gate miter
+sat -verify -prove-asserts -set-init-zero -set-at 1 in_rst 1 -seq 4 miter
+design -load postopt
+cd preg_rstval
+select -assert-count 1 t:DSP48E1
+select -assert-count 1 t:DSP48E1 r:PREG=0 %i
+
+design -load read
+hierarchy -top mreg_rstval
+proc
+equiv_opt -run :prove -map +/xilinx/cells_sim.v synth_xilinx -noiopad
+miter -equiv -flatten -make_assert -make_outputs gold gate miter
+sat -verify -prove-asserts -set-init-zero -set-at 1 in_rst 1 -seq 4 miter
+design -load postopt
+cd mreg_rstval
+select -assert-count 1 t:DSP48E1
+select -assert-count 1 t:DSP48E1 r:MREG=0 %i
+
+design -load read
+hierarchy -top adreg_rst
+proc
+equiv_opt -run :prove -map +/xilinx/cells_sim.v synth_xilinx -noiopad
+miter -equiv -flatten -make_assert -make_outputs gold gate miter
+sat -verify -prove-asserts -set-init-zero -set-at 1 in_rst 1 -seq 3 miter
+design -load postopt
+cd adreg_rst
+select -assert-count 1 t:DSP48E1
+select -assert-count 1 t:DSP48E1 r:ADREG=1 %i
+
+design -load read
+hierarchy -top dreg_rst_adreg_norst
+proc
+equiv_opt -run :prove -map +/xilinx/cells_sim.v synth_xilinx -noiopad
+miter -equiv -flatten -make_assert -make_outputs gold gate miter
+sat -verify -prove-asserts -set-init-zero -set-at 1 in_rst 1 -seq 4 miter
+design -load postopt
+cd dreg_rst_adreg_norst
+select -assert-count 1 t:DSP48E1
+select -assert-count 1 t:DSP48E1 r:DREG=0 %i
+
+design -load read
+hierarchy -top preg_signext
+proc
+equiv_opt -run :prove -map +/xilinx/cells_sim.v synth_xilinx -noiopad
+miter -equiv -flatten -make_assert -make_outputs gold gate miter
+sat -verify -prove-asserts -set-init-zero -seq 5 miter
+design -load postopt
+cd preg_signext
+select -assert-count 2 t:DSP48E1
+select -assert-count 2 t:DSP48E1 r:PREG=1'1 %i

@@ -447,6 +447,9 @@ struct SynthXilinxPass : public ScriptPass
 				run("opt_expr -fine");
 				run("wreduce");
 				run("select -clear");
+				// collapse sign-extension bits of registers so that they can be
+				// fully absorbed into the DSP (MREG/PREG)
+				run("wreduce t:$dff t:$dffe t:$sdff t:$sdffe");
 				if (help_mode)
 					run("xilinx_dsp -family <family>");
 				else

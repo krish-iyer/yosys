@@ -25,6 +25,232 @@
 USING_YOSYS_NAMESPACE
 PRIVATE_NAMESPACE_BEGIN
 
+// Helpers used by the pattern matchers below to reason about the range of
+// values a DSP48E1/DSP48E2 computes. The DSP always produces a full 48-bit
+// result, whereas the netlist it replaces may only use (and re-extend) some
+// of its low bits; absorbing an adder or forming a cascade is only valid if
+// those views agree.
+
+// Smallest n such that 'sig' is the sign-extension of sig[n-1:0], i.e. the
+// number of significant bits of 'sig' as a two's complement number
+static int xilinx_dsp_signed_width(const SigSpec &sig)
+{
+	int n = GetSize(sig);
+	while (n > 1 && sig[n-1] == sig[n-2])
+		n--;
+	return n;
+}
+
+static std::string xilinx_dsp_param_str(Cell *dsp, IdString name, const char *def)
+{
+	return dsp->hasParam(name) ? dsp->getParam(name).decode_string() : std::string(def);
+}
+
+// Upper bound on the number of significant (two's complement) bits of the
+// multiplier output of a DSP48E1/DSP48E2, derived from its operands; 48 if
+// unknown. *nonneg is set if the product is known to be non-negative.
+static int xilinx_dsp_product_width(const SigMap &sigmap, Cell *dsp, bool *nonneg = nullptr)
+{
+	if (nonneg)
+		*nonneg = false;
+	if (!dsp->type.in(ID(DSP48E1), ID(DSP48E2)))
+		return 48;
+	if (xilinx_dsp_param_str(dsp, ID(USE_MULT), "MULTIPLY") != "MULTIPLY")
+		return 48;
+	if (xilinx_dsp_param_str(dsp, ID(A_INPUT), "DIRECT") != "DIRECT" ||
+			xilinx_dsp_param_str(dsp, ID(B_INPUT), "DIRECT") != "DIRECT")
+		return 48;
+	bool e2 = dsp->type == ID(DSP48E2);
+	if (e2 && xilinx_dsp_param_str(dsp, ID(BMULTSEL), "B") != "B")
+		return 48;
+	if (!dsp->hasPort(ID::A) || !dsp->hasPort(ID::B))
+		return 48;
+	int aw = e2 ? 27 : 25;
+	SigSpec A = sigmap(dsp->getPort(ID::A));
+	A.extend_u0(30, true);
+	A = A.extract(0, aw);
+	int wa = xilinx_dsp_signed_width(A);
+	bool nna = A[aw-1] == State::S0;
+	bool preadd = e2 ? xilinx_dsp_param_str(dsp, ID(AMULTSEL), "A") == "AD"
+			: xilinx_dsp_param_str(dsp, ID(USE_DPORT), "FALSE") == "TRUE";
+	if (preadd) {
+		SigSpec D = dsp->hasPort(ID::D) ? sigmap(dsp->getPort(ID::D)) : SigSpec(State::S0, aw);
+		D.extend_u0(aw, true);
+		wa = std::min(aw, std::max(wa, xilinx_dsp_signed_width(D)) + 1);
+		nna = false;
+	}
+	SigSpec B = sigmap(dsp->getPort(ID::B));
+	B.extend_u0(18, true);
+	int wb = xilinx_dsp_signed_width(B);
+	bool nnb = B[17] == State::S0;
+	if (nonneg)
+		*nonneg = nna && nnb;
+	// a product with at least one non-negative operand needs one bit less
+	return std::min(48, wa + wb - ((nna || nnb) ? 1 : 0));
+}
+
+// Range of the full 48-bit result of a DSP48E1/DSP48E2 computing M (Z = 0)
+// or M +/- Z with Z = C: an upper bound on its significant (two's
+// complement) bits, and whether it is known to be non-negative. If 'pcin' is
+// given, Z may instead carry that range right-shifted by 'shift' (the cell is
+// about to take PCIN from the previous element of a cascade chain); both
+// possibilities are covered. {48, false} if unknown.
+struct XilinxDspRange {
+	int width;
+	bool nonneg;
+};
+
+static XilinxDspRange xilinx_dsp_range(const SigMap &sigmap, Cell *dsp, const XilinxDspRange *pcin = nullptr, int shift = 0)
+{
+	const XilinxDspRange unknown = {48, false};
+	if (!dsp->type.in(ID(DSP48E1), ID(DSP48E2)))
+		return unknown;
+	SigSpec opmode = dsp->hasPort(ID(OPMODE)) ? sigmap(dsp->getPort(ID(OPMODE))) : SigSpec();
+	SigSpec alumode = dsp->hasPort(ID(ALUMODE)) ? sigmap(dsp->getPort(ID(ALUMODE))) : SigSpec(State::S0, 4);
+	SigSpec carryinsel = dsp->hasPort(ID(CARRYINSEL)) ? sigmap(dsp->getPort(ID(CARRYINSEL))) : SigSpec(State::S0, 3);
+	SigSpec carryin = dsp->hasPort(ID(CARRYIN)) ? sigmap(dsp->getPort(ID(CARRYIN))) : SigSpec(State::S0);
+	if (GetSize(opmode) < 7 || !opmode.is_fully_const() || !alumode.is_fully_const() ||
+			!carryinsel.is_fully_zero() || !carryin.is_fully_const())
+		return unknown;
+	// Z + M or Z - M (ALUMODE 0000/0011, no carry-in), or M - Z (ALUMODE 0001
+	// with carry-in, i.e. ~Z + M + 1): all fit in max(width(M), width(Z)) + 1
+	Const am = alumode.as_const(), ci = carryin.as_const();
+	bool add = am == Const::from_string("0000") && ci.is_fully_zero();
+	bool sub = (am == Const::from_string("0011") && ci.is_fully_zero()) ||
+			(am == Const::from_string("0001") && ci.is_fully_ones());
+	if (!add && !sub)
+		return unknown;
+	Const op = opmode.as_const();
+	// X and Y must select M; W (DSP48E2 only) must select 0
+	if (op.extract(0, 4) != Const::from_string("0101"))
+		return unknown;
+	if (dsp->type == ID(DSP48E2) && (GetSize(op) < 9 || op.extract(7, 2) != Const::from_string("00")))
+		return unknown;
+	bool nonneg_m;
+	int wm = xilinx_dsp_product_width(sigmap, dsp, &nonneg_m);
+	Const z = op.extract(4, 3);
+	if (z == Const::from_string("000"))
+		return add ? XilinxDspRange{wm, nonneg_m} : unknown;
+	if (z != Const::from_string("011") || !dsp->hasPort(ID::C))
+		return unknown;
+	SigSpec C = sigmap(dsp->getPort(ID::C));
+	int wz = xilinx_dsp_signed_width(C);
+	bool nonneg_z = C[GetSize(C)-1] == State::S0;
+	if (pcin) {
+		wz = std::max(wz, std::max(1, pcin->width - shift));
+		nonneg_z = nonneg_z && pcin->nonneg;
+	}
+	return XilinxDspRange{std::min(48, std::max(wm, wz) + 1), add && nonneg_m && nonneg_z};
+}
+
+// The post-adder input 'in' is 'sigP' (the used low bits of the DSP's
+// product), extended to 'y_width' by the adder. Since the DSP adds its full
+// (sign-extended) product instead, the extension bits must agree with it.
+static bool xilinx_dsp_postadd_ok(const SigMap &sigmap, Cell *dsp, const SigSpec &in, bool in_signed, int y_width, const SigSpec &sigP)
+{
+	int k = GetSize(sigP);
+	if (k == 0)
+		return false;
+	if (y_width <= k)
+		return true;
+	SigSpec ext = in;
+	ext.extend_u0(std::max(y_width, GetSize(ext)), in_signed);
+	SigSpec upper = ext.extract(k, y_width - k);
+	bool nonneg;
+	int wm = xilinx_dsp_product_width(sigmap, dsp, &nonneg);
+	if (upper == SigSpec(sigP[k-1], y_width - k))
+		return wm <= k;
+	if (upper.is_fully_zero())
+		return nonneg && wm <= k + 1;
+	return false;
+}
+
+// Can the multiplier product of 'dsp' be scaled by 2**shift by left-shifting
+// one of its operands, without overflowing the operand? B is preferred; A is
+// only used when the pre-adder is not (going to be) used.
+static int xilinx_dsp_shift_operand(const SigMap &sigmap, Cell *dsp, int shift, bool preadd)
+{
+	SigSpec B = sigmap(dsp->getPort(ID::B));
+	B.extend_u0(18, true);
+	if (xilinx_dsp_signed_width(B) + shift <= 18)
+		return 'B';
+	if (preadd)
+		return 0;
+	int aw = dsp->type == ID(DSP48E2) ? 27 : 25;
+	SigSpec A = sigmap(dsp->getPort(ID::A));
+	A.extend_u0(30, true);
+	if (xilinx_dsp_signed_width(A) + shift <= aw)
+		return 'A';
+	return 0;
+}
+
+static bool xilinx_dsp_can_shift(const SigMap &sigmap, Cell *dsp, int shift, bool preadd)
+{
+	return xilinx_dsp_shift_operand(sigmap, dsp, shift, preadd) != 0;
+}
+
+// 'next' has its C input driven by the P output of 'prev' = chain.back()
+// (right-shifted by 'shift' bits, possibly truncated and extended). Check that
+// taking the full PCOUT of 'prev' via PCIN instead does not change anything
+// observable: either the whole of C equals PCIN (using the range of 'prev''s
+// result, propagated along the cascade chain), or the bits of 'next''s result
+// that could differ (at and above the first mismatching C bit -- carries only
+// propagate upwards) are not used at all.
+template<typename Chain, typename NUsers>
+static bool xilinx_dsp_cascade_ok(const SigMap &sigmap, const Chain &chain, Cell *next, int shift, NUsers nusers)
+{
+	Cell *prev = std::get<0>(chain.back());
+	if (!prev->hasPort(ID::P) || !next->hasPort(ID::C) || !next->hasPort(ID::P))
+		return false;
+	SigSpec P = sigmap(prev->getPort(ID::P));
+	SigSpec C = sigmap(next->getPort(ID::C));
+	if (GetSize(P) != 48 || GetSize(C) != 48)
+		return false;
+	int k = 0;
+	while (k + shift < 48 && C[k] == P[k + shift])
+		k++;
+	if (k == 0)
+		return false;
+	// Only the low k bits of 'next''s result can be relied upon
+	if (nusers(next->getPort(ID::P).extract_end(k)) <= 1)
+		return true;
+	bool sext = true, zext = true;
+	for (int j = k; j < 48; j++) {
+		sext = sext && C[j] == C[k-1];
+		zext = zext && C[j] == State::S0;
+	}
+	if (sext && k + shift >= 48)
+		return true;
+	// Range of 'prev''s result, propagated from the head of the chain
+	XilinxDspRange r = xilinx_dsp_range(sigmap, std::get<0>(chain.front()));
+	for (int i = 1; i < GetSize(chain); i++)
+		r = xilinx_dsp_range(sigmap, std::get<0>(chain[i]), &r, std::max(0, std::get<1>(chain[i])));
+	if (sext && r.width <= k + shift)
+		return true;
+	if (zext && r.nonneg && r.width - 1 <= k + shift)
+		return true;
+	return false;
+}
+
+// Signal to drive the RST pin of a DSP register replacing fabric register
+// 'ff'. DSP registers reset regardless of their CE, so the reset of an
+// enable-gated $sdffce must be qualified with its enable (RST = SRST & EN).
+static SigSpec xilinx_dsp_rst_sig(Module *module, Cell *ff)
+{
+	if (!ff->type.in(ID($sdff), ID($sdffe), ID($sdffce)))
+		return State::S0;
+	SigSpec srst = ff->getPort(ID::SRST);
+	if (!ff->getParam(ID::SRST_POLARITY).as_bool())
+		srst = module->Not(NEW_ID, srst);
+	if (ff->type == ID($sdffce)) {
+		SigSpec en = ff->getPort(ID::EN);
+		if (!ff->getParam(ID::EN_POLARITY).as_bool())
+			en = module->Not(NEW_ID, en);
+		srst = module->And(NEW_ID, srst, en);
+	}
+	return srst;
+}
+
 #include "techlibs/xilinx/xilinx_dsp_pm.h"
 #include "techlibs/xilinx/xilinx_dsp48a_pm.h"
 #include "techlibs/xilinx/xilinx_dsp_CREG_pm.h"
@@ -288,7 +514,8 @@ void xilinx_dsp_pack(xilinx_dsp_pm &pm)
 		if (st.sigA == preAdder->getPort(ID::B))
 			std::swap(A_SIGNED, D_SIGNED);
 		st.sigA.extend_u0(30, A_SIGNED);
-		st.sigD.extend_u0(25, D_SIGNED);
+		// D port (and pre-adder) is 25 bits on DSP48E1, 27 bits on DSP48E2
+		st.sigD.extend_u0(cell->type == ID(DSP48E2) ? 27 : 25, D_SIGNED);
 		cell->setPort(ID::A, st.sigA);
 		cell->setPort(ID::D, st.sigD);
 		if (preAdder->type == ID($add))
@@ -297,22 +524,46 @@ void xilinx_dsp_pack(xilinx_dsp_pm &pm)
 			cell->setPort(ID(INMODE), Const::from_string("01100"));
 
 		if (st.ffAD) {
-			if (st.ffAD->type.in(ID($dffe), ID($sdffe))) {
+			if (st.ffAD->type.in(ID($dffe), ID($sdffe), ID($sdffce))) {
 				bool pol = st.ffAD->getParam(ID::EN_POLARITY).as_bool();
 				SigSpec S = st.ffAD->getPort(ID::EN);
 				cell->setPort(ID(CEAD), pol ? S : pm.module->Not(NEW_ID, S));
 			}
 			else
 				cell->setPort(ID(CEAD), State::S1);
+			// The AD register is reset by RSTD (shared with DREG; the pattern
+			// matcher only packs a DREG whose reset is identical)
+			cell->setPort(ID(RSTD), xilinx_dsp_rst_sig(pm.module, st.ffAD));
 			cell->setParam(ID(ADREG), 1);
 		}
 
-		cell->setParam(ID(USE_DPORT), Const("TRUE"));
+		if (cell->type == ID(DSP48E2))
+			// Multiplier A-input is the pre-adder output; the pre-adder
+			// takes A (PREADDINSEL = "A", the default) and D
+			cell->setParam(ID(AMULTSEL), Const("AD"));
+		else
+			cell->setParam(ID(USE_DPORT), Const("TRUE"));
 
 		pm.autoremove(preAdder);
 	}
 	if (st.postAdd) {
 		log("  postadder %s (%s)\n", st.postAdd, st.postAdd->type.unescape());
+
+		if (st.postAddShift > 0) {
+			// The product reaches the adder left-shifted (with zero LSBs), so
+			// move that shift into a multiplier operand
+			int n = st.postAddShift;
+			int which = xilinx_dsp_shift_operand(pm.sigmap, cell, n, st.preAdd || st.preSub);
+			log_assert(which != 0);
+			IdString port = which == 'B' ? ID::B : ID::A;
+			int width = which == 'B' ? 18 : 30;
+			SigSpec sig = cell->getPort(port);
+			sig.extend_u0(width, true);
+			SigSpec shifted(State::S0, n);
+			shifted.append(sig.extract(0, width - n));
+			cell->setPort(port, shifted);
+			log("  shifted %s operand left by %d to absorb zero LSBs of the post-adder input\n", which == 'B' ? "B" : "A", n);
+		}
 
 		SigSpec &opmode = cell->connections_.at(ID(OPMODE));
 		if (st.postAddMux) {
@@ -328,11 +579,25 @@ void xilinx_dsp_pack(xilinx_dsp_pm &pm)
 		opmode[5] = State::S1;
 
 		if (opmode[4] != State::S0) {
-			if (st.postAddMuxAB == ID::A)
+			// extend C according to the signedness of the adder input it replaces
+			if (st.postAddAB == ID::A)
 				st.sigC.extend_u0(48, st.postAdd->getParam(ID::B_SIGNED).as_bool());
 			else
 				st.sigC.extend_u0(48, st.postAdd->getParam(ID::A_SIGNED).as_bool());
 			cell->setPort(ID::C, st.sigC);
+		}
+
+		if (st.postAdd->type == ID($sub)) {
+			if (st.postAddAB == ID::A) {
+				// product - Z  ==  ~Z + product + 1
+				cell->setPort(ID(ALUMODE), Const::from_string("0001"));
+				cell->setPort(ID(CARRYIN), State::S1);
+			} else {
+				// Z - product
+				cell->setPort(ID(ALUMODE), Const::from_string("0011"));
+				cell->setPort(ID(CARRYIN), State::S0);
+			}
+			cell->setPort(ID(CARRYINSEL), Const(0, 3));
 		}
 
 		pm.autoremove(st.postAdd);
@@ -375,16 +640,9 @@ void xilinx_dsp_pack(xilinx_dsp_pm &pm)
 			SigSpec Q = pm.sigmap(ff->getPort(ID::Q));
 			if (!A.empty())
 				A.replace(Q, D);
-			if (rstport != IdString::Null) {
-				if (ff->type.in(ID($sdff), ID($sdffe))) {
-					SigSpec srst = ff->getPort(ID::SRST);
-					bool rstpol = ff->getParam(ID::SRST_POLARITY).as_bool();
-					cell->setPort(rstport, rstpol ? srst : pm.module->Not(NEW_ID, srst));
-				} else {
-					cell->setPort(rstport, State::S0);
-				}
-			}
-			if (ff->type.in(ID($dffe), ID($sdffe))) {
+			if (rstport != IdString::Null)
+				cell->setPort(rstport, xilinx_dsp_rst_sig(pm.module, ff));
+			if (ff->type.in(ID($dffe), ID($sdffe), ID($sdffce))) {
 				SigSpec ce = ff->getPort(ID::EN);
 				bool cepol = ff->getParam(ID::EN_POLARITY).as_bool();
 				cell->setPort(ceport, cepol ? ce : pm.module->Not(NEW_ID, ce));
@@ -449,6 +707,26 @@ void xilinx_dsp_pack(xilinx_dsp_pm &pm)
 		if (st.ffP) {
 			SigSpec P; // unused
 			f(P, st.ffP, ID(CEP), ID(RSTP));
+			// Bits of the P register that are not absorbed into the DSP but
+			// whose 'D' duplicates an absorbed bit (e.g. sign-extension bits)
+			// would lose their driver: drive them from the equivalent
+			// (absorbed) bit instead, which is now driven by the DSP's 'P'
+			{
+				pool<SigBit> absorbed(st.sigP.begin(), st.sigP.end());
+				SigSpec D = pm.sigmap(st.ffP->getPort(ID::D));
+				SigSpec Q = st.ffP->getPort(ID::Q);
+				dict<SigBit, SigBit> d2q;
+				for (int i = 0; i < GetSize(Q); i++)
+					if (absorbed.count(Q[i]))
+						d2q[D[i]] = Q[i];
+				SigSpec newQ = Q;
+				for (int i = 0; i < GetSize(Q); i++)
+					if (!absorbed.count(Q[i]) && d2q.count(D[i])) {
+						pm.module->connect(Q[i], d2q.at(D[i]));
+						newQ[i] = pm.module->addWire(NEW_ID);
+					}
+				st.ffP->setPort(ID::Q, newQ);
+			}
 			st.ffP->connections_.at(ID::Q).replace(st.sigP, pm.module->addWire(NEW_ID, GetSize(st.sigP)));
 			cell->setParam(ID(PREG), State::S1);
 		}
@@ -686,16 +964,9 @@ void xilinx_dsp_packC(xilinx_dsp_CREG_pm &pm)
 			SigSpec Q = pm.sigmap(ff->getPort(ID::Q));
 			if (!A.empty())
 				A.replace(Q, D);
-			if (rstport != IdString::Null) {
-				if (ff->type.in(ID($sdff), ID($sdffe))) {
-					SigSpec srst = ff->getPort(ID::SRST);
-					bool rstpol = ff->getParam(ID::SRST_POLARITY).as_bool();
-					cell->setPort(rstport, rstpol ? srst : pm.module->Not(NEW_ID, srst));
-				} else {
-					cell->setPort(rstport, State::S0);
-				}
-			}
-			if (ff->type.in(ID($dffe), ID($sdffe))) {
+			if (rstport != IdString::Null)
+				cell->setPort(rstport, xilinx_dsp_rst_sig(pm.module, ff));
+			if (ff->type.in(ID($dffe), ID($sdffe), ID($sdffce))) {
 				SigSpec ce = ff->getPort(ID::EN);
 				bool cepol = ff->getParam(ID::EN_POLARITY).as_bool();
 				cell->setPort(ceport, cepol ? ce : pm.module->Not(NEW_ID, ce));
@@ -730,6 +1001,575 @@ void xilinx_dsp_packC(xilinx_dsp_CREG_pm &pm)
 	}
 
 	pm.blacklist(cell);
+}
+
+// Vivado's opt_design moves a C input of a DSP that is driven by the full P
+// output of another DSP onto the dedicated PCOUT -> PCIN cascade. If such
+// DSP -> DSP connections form a cycle (e.g. an accumulator spread over several
+// DSPs, acc <= acc + m0 - m1), the cascade chain cannot be placed and routing
+// fails. Break such cycles by moving the P register of one DSP in the cycle
+// back into the fabric (keeping the same clock enable and reset), so that the
+// cycle passes through a fabric register.
+static void xilinx_dsp_break_cycles(Module *module, const std::vector<Cell*> &selected_cells)
+{
+	SigMap sigmap(module);
+	std::vector<Cell*> dsps;
+	dict<SigBit, Cell*> pdrv;
+	for (auto cell : selected_cells)
+		if (cell->type == ID(DSP48E2)) {
+			dsps.push_back(cell);
+			if (cell->hasPort(ID::P))
+				for (auto bit : sigmap(cell->getPort(ID::P)))
+					if (bit.wire)
+						pdrv[bit] = cell;
+		}
+	if (GetSize(dsps) < 2)
+		return;
+
+	pool<SigBit> consumed;
+	for (auto cell : module->cells())
+		for (auto &conn : cell->connections())
+			if (cell->input(conn.first))
+				for (auto bit : sigmap(conn.second))
+					consumed.insert(bit);
+	for (auto wire : module->wires())
+		if (wire->port_output)
+			for (auto bit : sigmap(SigSpec(wire)))
+				consumed.insert(bit);
+
+	auto port_used = [&](Cell *c, IdString p) {
+		if (!c->hasPort(p))
+			return false;
+		for (auto bit : sigmap(c->getPort(p)))
+			if (bit.wire && consumed.count(bit))
+				return true;
+		return false;
+	};
+	// Can the P register of 'c' move into the fabric without changing anything?
+	auto can_unpack = [&](Cell *c) {
+		if (!c->hasParam(ID(PREG)) || c->getParam(ID(PREG)).as_int() != 1)
+			return false;
+		for (auto p : {ID(PCOUT), ID(CARRYOUT), ID(CARRYCASCOUT), ID(MULTSIGNOUT), ID(PATTERNDETECT),
+				ID(PATTERNBDETECT), ID(OVERFLOW), ID(UNDERFLOW), ID(XOROUT)})
+			if (port_used(c, p))
+				return false;
+		for (auto p : {ID(IS_CLK_INVERTED), ID(IS_RSTP_INVERTED)})
+			if (c->hasParam(p) && c->getParam(p).as_bool())
+				return false;
+		// P feedback (Z = P, P >> 17 or MACC extend; W = P) requires PREG
+		SigSpec opmode = c->hasPort(ID(OPMODE)) ? sigmap(c->getPort(ID(OPMODE))) : SigSpec();
+		if (GetSize(opmode) != 9 || !opmode.is_fully_const())
+			return false;
+		Const op = opmode.as_const();
+		Const z = op.extract(4, 3), w = op.extract(7, 2);
+		if (z == Const::from_string("010") || z == Const::from_string("100") || z == Const::from_string("110") ||
+				w == Const::from_string("01"))
+			return false;
+		return true;
+	};
+	auto unpack_preg = [&](Cell *c) {
+		SigSpec P = c->getPort(ID::P);
+		SigSpec newP = module->addWire(NEW_ID, GetSize(P));
+		SigSpec clk = c->getPort(ID::CLK);
+		SigSpec cep = c->hasPort(ID(CEP)) ? c->getPort(ID(CEP)) : SigSpec(State::S1);
+		SigSpec rstp = c->hasPort(ID(RSTP)) ? c->getPort(ID(RSTP)) : SigSpec(State::S0);
+		bool has_ce = !sigmap(cep).is_fully_ones(), has_rst = !sigmap(rstp).is_fully_zero();
+		// DSP registers reset regardless of their CE, i.e. like $sdffe
+		if (has_rst && has_ce)
+			module->addSdffe(NEW_ID, clk, cep, rstp, newP, P, Const(0, GetSize(P)));
+		else if (has_rst)
+			module->addSdff(NEW_ID, clk, rstp, newP, P, Const(0, GetSize(P)));
+		else if (has_ce)
+			module->addDffe(NEW_ID, clk, cep, newP, P);
+		else
+			module->addDff(NEW_ID, clk, newP, P);
+		c->setPort(ID::P, newP);
+		c->setParam(ID(PREG), 0);
+		for (auto bit : sigmap(P))
+			pdrv.erase(bit);
+		log("Moved the P register of %s into the fabric to break a DSP -> DSP C-input cycle.\n", c);
+	};
+
+	for (int iter = 0; iter < GetSize(dsps); iter++) {
+		dict<Cell*, std::vector<Cell*>> succ;
+		for (auto y : dsps) {
+			if (!y->hasPort(ID::C))
+				continue;
+			pool<Cell*> seen;
+			for (auto bit : sigmap(y->getPort(ID::C))) {
+				auto it = pdrv.find(bit);
+				if (it != pdrv.end() && seen.insert(it->second).second)
+					succ[it->second].push_back(y);
+			}
+		}
+		// find a cycle (iterative DFS with colours)
+		dict<Cell*, int> colour;
+		dict<Cell*, Cell*> parent;
+		std::vector<Cell*> cycle;
+		for (auto root : dsps) {
+			if (colour[root] != 0 || !cycle.empty())
+				continue;
+			std::vector<std::pair<Cell*, int>> stack = {{root, 0}};
+			colour[root] = 1;
+			while (!stack.empty() && cycle.empty()) {
+				Cell *c = stack.back().first;
+				int &idx = stack.back().second;
+				auto &next = succ[c];
+				if (idx < GetSize(next)) {
+					Cell *n = next[idx++];
+					if (colour[n] == 0) {
+						colour[n] = 1;
+						parent[n] = c;
+						stack.push_back({n, 0});
+					} else if (colour[n] == 1) {
+						for (Cell *x = c; ; x = parent.at(x)) {
+							cycle.push_back(x);
+							if (x == n)
+								break;
+						}
+					}
+				} else {
+					colour[c] = 2;
+					stack.pop_back();
+				}
+			}
+		}
+		if (cycle.empty())
+			break;
+		Cell *victim = nullptr;
+		for (auto c : cycle)
+			if (can_unpack(c)) {
+				victim = c;
+				break;
+			}
+		if (victim == nullptr) {
+			log_warning("DSP -> DSP C-input cycle through %s cannot be broken; Vivado may fail to place its cascades.\n", cycle.front());
+			break;
+		}
+		unpack_preg(victim);
+	}
+}
+
+// mul2dsp puts the wider multiplier operand on A. If the operand on B is the
+// output of an adder/subtractor (directly or through one register) that could
+// use the DSP48E2 pre-adder (which is on the A side), and the A operand also
+// fits into B, swap the two operands (e.g. symmetric FIR filters, where the
+// pre-added data is narrower than the coefficient). Both operands are sign
+// extended, so swapping them does not change the product.
+static void xilinx_dsp_swap_operands(Module *module, const std::vector<Cell*> &selected_cells)
+{
+	SigMap sigmap(module);
+	dict<SigBit, Cell*> driver;
+	for (auto cell : module->cells()) {
+		IdString out;
+		if (cell->type.in(ID($add), ID($sub)))
+			out = ID::Y;
+		else if (cell->type.in(ID($dff), ID($dffe), ID($sdff), ID($sdffe), ID($sdffce)))
+			out = ID::Q;
+		else
+			continue;
+		for (auto bit : sigmap(cell->getPort(out)))
+			if (bit.wire)
+				driver[bit] = cell;
+	}
+	// The single cell driving all non-constant bits of 'sig', if any
+	auto single_driver = [&](const SigSpec &sig) -> Cell* {
+		Cell *d = nullptr;
+		for (auto bit : sig) {
+			if (!bit.wire)
+				continue;
+			auto it = driver.find(bit);
+			if (it == driver.end() || (d && it->second != d))
+				return nullptr;
+			d = it->second;
+		}
+		return d;
+	};
+	auto from_adder = [&](const SigSpec &sig) {
+		Cell *d = single_driver(sig);
+		if (d && d->type.in(ID($dff), ID($dffe), ID($sdff), ID($sdffe), ID($sdffce))) {
+			SigSpec dsig;
+			SigSpec Q = sigmap(d->getPort(ID::Q)), D = sigmap(d->getPort(ID::D));
+			for (auto bit : sig) {
+				int i = 0;
+				while (i < GetSize(Q) && Q[i] != bit)
+					i++;
+				dsig.append(i < GetSize(Q) ? D[i] : bit);
+			}
+			d = single_driver(dsig);
+		}
+		return d && d->type.in(ID($add), ID($sub));
+	};
+
+	for (auto dsp : selected_cells) {
+		if (dsp->type != ID(DSP48E2))
+			continue;
+		if (xilinx_dsp_param_str(dsp, ID(AMULTSEL), "A") != "A" || xilinx_dsp_param_str(dsp, ID(BMULTSEL), "B") != "B" ||
+				xilinx_dsp_param_str(dsp, ID(USE_MULT), "MULTIPLY") != "MULTIPLY" ||
+				xilinx_dsp_param_str(dsp, ID(A_INPUT), "DIRECT") != "DIRECT" ||
+				xilinx_dsp_param_str(dsp, ID(B_INPUT), "DIRECT") != "DIRECT")
+			continue;
+		if ((dsp->hasParam(ID(AREG)) && dsp->getParam(ID(AREG)).as_int() != 0) ||
+				(dsp->hasParam(ID(BREG)) && dsp->getParam(ID(BREG)).as_int() != 0))
+			continue;
+		if (dsp->hasPort(ID::D) && !sigmap(dsp->getPort(ID::D)).is_fully_zero())
+			continue;
+		if (dsp->hasPort(ID(INMODE)) && !sigmap(dsp->getPort(ID(INMODE))).is_fully_zero())
+			continue;
+		SigSpec A = sigmap(dsp->getPort(ID::A)), B = sigmap(dsp->getPort(ID::B));
+		if (GetSize(A) != 30 || GetSize(B) != 18)
+			continue;
+		int wa = xilinx_dsp_signed_width(A), wb = xilinx_dsp_signed_width(B);
+		if (wa > 18 || from_adder(A.extract(0, wa)) || !from_adder(B.extract(0, wb)))
+			continue;
+		SigSpec oldA = dsp->getPort(ID::A), oldB = dsp->getPort(ID::B);
+		SigSpec newA = oldB;
+		newA.extend_u0(30, true);
+		dsp->setPort(ID::A, newA);
+		dsp->setPort(ID::B, oldA.extract(0, 18));
+		log("Swapped A and B operands of %s so that the pre-adder can be used.\n", dsp);
+	}
+}
+
+// opt_expr strips the zero LSBs of constant multiplicands, so a DSP computing
+// e.g. x * 1234 actually computes x * 617 with the "<< 1" done in wiring. For a
+// DSP48E2 whose P is just its product (Z = 0, no carry-in), and whose P drives
+// the C input of other DSPs only through such a left shift by 's' (with zero
+// LSBs), move the shift back into the multiplier: shift an operand left by 's'
+// and drive its existing P wires from P[j+s] instead of P[j] -- every user sees
+// the same values -- and let those DSPs take the (zero) LSBs of P instead of
+// constant zeros in C. This allows PCOUT -> PCIN cascades to be formed later.
+static void xilinx_dsp_shift_heads(Module *module, const std::vector<Cell*> &selected_cells)
+{
+	SigMap sigmap(module);
+	dict<SigBit, std::pair<Cell*, int>> pbit;
+	for (auto cell : selected_cells)
+		if (cell->type == ID(DSP48E2) && cell->hasPort(ID::P)) {
+			SigSpec P = sigmap(cell->getPort(ID::P));
+			for (int i = 0; i < GetSize(P); i++)
+				if (P[i].wire)
+					pbit[P[i]] = {cell, i};
+		}
+
+	// Bits consumed by any cell input or module output
+	pool<SigBit> consumed;
+	for (auto cell : module->cells())
+		for (auto &conn : cell->connections())
+			if (cell->input(conn.first))
+				for (auto bit : sigmap(conn.second))
+					consumed.insert(bit);
+	for (auto wire : module->wires())
+		if (wire->port_output)
+			for (auto bit : sigmap(SigSpec(wire)))
+				consumed.insert(bit);
+
+	// Candidate shift per head DSP, from the C inputs of other DSP48E2s
+	dict<Cell*, int> shift;
+	dict<Cell*, std::vector<Cell*>> users;
+	pool<Cell*> bad;
+	for (auto next : selected_cells) {
+		if (next->type != ID(DSP48E2) || !next->hasPort(ID::C))
+			continue;
+		SigSpec C = sigmap(next->getPort(ID::C));
+		int z = 0;
+		while (z < GetSize(C) && C[z] == State::S0)
+			z++;
+		if (z == 0 || z == GetSize(C))
+			continue;
+		auto it = pbit.find(C[z]);
+		if (it == pbit.end() || it->second.second != 0)
+			continue;
+		Cell *head = it->second.first;
+		if (shift.count(head) && shift.at(head) != z)
+			bad.insert(head);
+		shift[head] = z;
+		users[head].push_back(next);
+	}
+
+	for (auto &it : shift) {
+		Cell *head = it.first;
+		int s = it.second;
+		if (bad.count(head))
+			continue;
+		// P must be exactly the product: X/Y = M, Z = 0, W = 0, ALUMODE add, no carry-in
+		SigSpec opmode = head->hasPort(ID(OPMODE)) ? sigmap(head->getPort(ID(OPMODE))) : SigSpec();
+		if (GetSize(opmode) != 9 || !opmode.is_fully_const() || opmode.as_const() != Const::from_string("000000101"))
+			continue;
+		if (!head->hasPort(ID(ALUMODE)) || !sigmap(head->getPort(ID(ALUMODE))).is_fully_zero() ||
+				(head->hasPort(ID(CARRYIN)) && !sigmap(head->getPort(ID(CARRYIN))).is_fully_zero()) ||
+				(head->hasPort(ID(CARRYINSEL)) && !sigmap(head->getPort(ID(CARRYINSEL))).is_fully_zero()))
+			continue;
+		if (xilinx_dsp_param_str(head, ID(USE_MULT), "MULTIPLY") != "MULTIPLY")
+			continue;
+		bool preadd = xilinx_dsp_param_str(head, ID(AMULTSEL), "A") == "AD";
+		int which = xilinx_dsp_shift_operand(sigmap, head, s, preadd);
+		if (!which)
+			continue;
+		// the top 's' bits of P would be lost: they must be unused
+		SigSpec P = head->getPort(ID::P);
+		bool top_used = false;
+		for (int i = GetSize(P) - s; i < GetSize(P); i++)
+			if (consumed.count(sigmap(P[i])))
+				top_used = true;
+		if (top_used)
+			continue;
+
+		// shift the operand
+		IdString port = which == 'B' ? ID::B : ID::A;
+		int width = which == 'B' ? 18 : 30;
+		SigSpec op = head->getPort(port);
+		op.extend_u0(width, true);
+		SigSpec shifted_op(State::S0, s);
+		shifted_op.append(op.extract(0, width - s));
+		head->setPort(port, shifted_op);
+		// re-drive the existing P wires from P[j+s]; P[s-1:0] are new (always 0)
+		SigSpec lsb = module->addWire(NEW_ID, s);
+		SigSpec newP = lsb;
+		newP.append(P.extract(0, GetSize(P) - s));
+		head->setPort(ID::P, newP);
+		// the users take P's (zero) LSBs instead of constant zeros
+		for (auto next : users.at(head)) {
+			SigSpec C = next->getPort(ID::C);
+			for (int i = 0; i < s; i++)
+				C[i] = lsb[i];
+			next->setPort(ID::C, C);
+		}
+		log("Moved the << %d of %s's product into its %s operand.\n", s, head, which == 'B' ? "B" : "A");
+	}
+}
+
+// Use ACOUT -> ACIN and BCOUT -> BCIN cascades for A/B inputs that are
+// delayed copies of the A/B input of another DSP48E2, e.g. the data delay line
+// of a systolic FIR filter (x -> xr[0] -> xr[1] -> ...). If the A (B) input of
+// 'next' is the A (B) input of 'prev' delayed by one or two fabric registers
+// that are equivalent to the A1/A2 (B1/B2) registers of 'prev' (same clock,
+// enable and reset, zero init), then 'next' can take 'prev's ACOUT (BCOUT)
+// instead, with ACASCREG (BCASCREG) set accordingly, making those fabric
+// registers redundant. Every DSP keeps at most one cascade neighbour in each
+// direction (shared by its [ABP]CIN/[ABP]COUT), as required for placement.
+static void xilinx_dsp_abcascade(Module *module, const std::vector<Cell*> &selected_cells)
+{
+	const int MAX_CASCADE = 20;
+	SigMap sigmap(module);
+
+	dict<SigBit, std::pair<Cell*, int>> ffq;
+	dict<SigBit, Cell*> cout_driver;
+	for (auto cell : module->cells()) {
+		if (cell->type.in(ID($dff), ID($dffe), ID($sdff), ID($sdffe))) {
+			SigSpec Q = sigmap(cell->getPort(ID::Q));
+			for (int i = 0; i < GetSize(Q); i++)
+				if (Q[i].wire)
+					ffq[Q[i]] = {cell, i};
+		}
+		if (cell->type == ID(DSP48E2))
+			for (auto p : {ID(ACOUT), ID(BCOUT), ID(PCOUT)})
+				if (cell->hasPort(p))
+					for (auto bit : sigmap(cell->getPort(p)))
+						if (bit.wire)
+							cout_driver[bit] = cell;
+	}
+
+	auto pstr = [](Cell *c, IdString p, const char *def) { return xilinx_dsp_param_str(c, p, def); };
+	auto pint = [](Cell *c, IdString p, int def) { return c->hasParam(p) ? c->getParam(p).as_int() : def; };
+	auto port_or = [&](Cell *c, IdString p, SigSpec def) { return c->hasPort(p) ? sigmap(c->getPort(p)) : def; };
+	auto used = [&](Cell *c, IdString p) {
+		if (!c->hasPort(p))
+			return false;
+		for (auto bit : sigmap(c->getPort(p)))
+			if (bit.wire)
+				return true;
+		return false;
+	};
+
+	// Existing cascade neighbours (from the PCOUT -> PCIN matcher etc.)
+	dict<Cell*, Cell*> pred, succ;
+	for (auto cell : selected_cells) {
+		if (cell->type != ID(DSP48E2))
+			continue;
+		for (auto p : {ID(ACIN), ID(BCIN), ID(PCIN)})
+			if (cell->hasPort(p))
+				for (auto bit : sigmap(cell->getPort(p))) {
+					auto it = cout_driver.find(bit);
+					if (it != cout_driver.end()) {
+						pred[cell] = it->second;
+						succ[it->second] = cell;
+					}
+				}
+	}
+
+	// The fabric register driving all non-constant bits of 'sig' (if any one
+	// register does), returning 'sig' as seen at that register's D input
+	auto through_ff = [&](const SigSpec &sig, Cell *&ff) {
+		ff = nullptr;
+		SigSpec d;
+		for (auto bit : sig) {
+			if (!bit.wire) {
+				d.append(bit);
+				continue;
+			}
+			auto it = ffq.find(bit);
+			if (it == ffq.end() || (ff && it->second.first != ff))
+				return SigSpec();
+			ff = it->second.first;
+			d.append(sigmap(ff->getPort(ID::D))[it->second.second]);
+		}
+		return ff ? d : SigSpec();
+	};
+
+	// Is fabric register 'ff' equivalent to a 'prev' input register with
+	// enable 'ce' and reset 'rst' (inverted if parameter 'rst_inv' is set)?
+	auto ff_matches = [&](Cell *ff, Cell *prev, IdString ce, IdString rst, IdString rst_inv) {
+		if (!ff->getParam(ID::CLK_POLARITY).as_bool())
+			return false;
+		if (sigmap(ff->getPort(ID::CLK)) != port_or(prev, ID::CLK, SigSpec()))
+			return false;
+		SigSpec r = port_or(prev, rst, SigSpec(State::S0));
+		if (ff->type.in(ID($sdff), ID($sdffe))) {
+			if (!ff->getParam(ID::SRST_VALUE).is_fully_zero() || !ff->getParam(ID::SRST_POLARITY).as_bool() ||
+					sigmap(ff->getPort(ID::SRST)) != r || pint(prev, rst_inv, 0))
+				return false;
+		} else if (!r.is_fully_zero())
+			return false;
+		SigSpec en = port_or(prev, ce, SigSpec(State::S1));
+		if (ff->type.in(ID($dffe), ID($sdffe))) {
+			if (!ff->getParam(ID::EN_POLARITY).as_bool() || sigmap(ff->getPort(ID::EN)) != en)
+				return false;
+		} else if (!en.is_fully_ones())
+			return false;
+		// DSP registers power up as zero
+		for (auto bit : ff->getPort(ID::Q))
+			if (bit.wire) {
+				Const init = bit.wire->attributes.at(ID::init, Const());
+				if (!init.empty() && init[bit.offset] == State::S1)
+					return false;
+			}
+		return true;
+	};
+
+	struct Kind {
+		IdString port, cin, cout, input, cascreg, reg, ce1, ce2, rst, rst_inv;
+		int width;
+	};
+	const Kind kinds[2] = {
+		{ID::A, ID(ACIN), ID(ACOUT), ID(A_INPUT), ID(ACASCREG), ID(AREG), ID(CEA1), ID(CEA2), ID(RSTA), ID(IS_RSTA_INVERTED), 30},
+		{ID::B, ID(BCIN), ID(BCOUT), ID(B_INPUT), ID(BCASCREG), ID(BREG), ID(CEB1), ID(CEB2), ID(RSTB), ID(IS_RSTB_INVERTED), 18},
+	};
+
+	// Forward map: register D bit -> (register, bit index), to find the
+	// fabric copy of a signal delayed by one cycle
+	dict<SigBit, std::pair<Cell*, int>> ffd;
+	for (auto &it : ffq) {
+		Cell *ff = it.second.first;
+		int idx = it.second.second;
+		SigBit d = sigmap(ff->getPort(ID::D))[idx];
+		if (d.wire)
+			ffd[d] = it.second;
+	}
+	auto forward_ff = [&](const SigSpec &sig) {
+		Cell *ff = nullptr;
+		SigSpec q;
+		for (auto bit : sig) {
+			if (!bit.wire) {
+				q.append(bit);
+				continue;
+			}
+			auto it = ffd.find(bit);
+			if (it == ffd.end() || (ff && it->second.first != ff))
+				return SigSpec();
+			ff = it->second.first;
+			q.append(sigmap(ff->getPort(ID::Q))[it->second.second]);
+		}
+		return ff ? q : SigSpec();
+	};
+
+	for (auto &k : kinds) {
+		// Index DSPs by their (logical) A/B input. For DSPs already fed by a
+		// cascade, that is the input of the predecessor delayed by its
+		// [AB]CASCREG, if that delayed copy exists in the fabric.
+		dict<Cell*, SigSpec> logical;
+		std::function<SigSpec(Cell*, int)> logical_input = [&](Cell *c, int depth) -> SigSpec {
+			if (logical.count(c))
+				return logical.at(c);
+			SigSpec r;
+			if (pstr(c, k.input, "DIRECT") == "DIRECT")
+				r = sigmap(c->getPort(k.port));
+			else if (depth < MAX_CASCADE && pred.count(c) && used(c, k.cin)) {
+				Cell *p = pred.at(c);
+				r = logical_input(p, depth + 1);
+				for (int i = 0; i < pint(p, k.cascreg, 1) && !r.empty(); i++)
+					r = forward_ff(r);
+			}
+			logical[c] = r;
+			return r;
+		};
+		dict<SigSpec, Cell*> by_input;
+		for (auto cell : selected_cells)
+			if (cell->type == ID(DSP48E2) && !pint(cell, ID(IS_CLK_INVERTED), 0)) {
+				SigSpec in = logical_input(cell, 0);
+				if (!in.empty() && !in.is_fully_const())
+					by_input[in] = cell;
+			}
+
+		std::vector<std::tuple<Cell*, Cell*, int>> todo;
+		for (auto next : selected_cells) {
+			if (next->type != ID(DSP48E2) || pstr(next, k.input, "DIRECT") != "DIRECT" || used(next, k.cin))
+				continue;
+			SigSpec s0 = sigmap(next->getPort(k.port));
+			Cell *ff1 = nullptr, *ff2 = nullptr;
+			SigSpec s1 = through_ff(s0, ff1);
+			SigSpec s2 = s1.empty() ? SigSpec() : through_ff(s1, ff2);
+			for (int levels = 2; levels >= 1; levels--) {
+				SigSpec src = levels == 2 ? s2 : s1;
+				if (src.empty())
+					continue;
+				auto it = by_input.find(src);
+				if (it == by_input.end())
+					continue;
+				Cell *prev = it->second;
+				if (prev == next || used(prev, k.cout))
+					continue;
+				// keep a single cascade neighbour per direction
+				if ((pred.count(next) && pred.at(next) != prev) || (succ.count(prev) && succ.at(prev) != next))
+					continue;
+				int reg = pint(prev, k.reg, 1);
+				bool ok;
+				if (levels == 2)
+					ok = reg == 2 && ff_matches(ff1, prev, k.ce2, k.rst, k.rst_inv) &&
+							ff_matches(ff2, prev, k.ce1, k.rst, k.rst_inv);
+				else
+					ok = reg >= 1 && ff_matches(ff1, prev, reg == 2 ? k.ce1 : k.ce2, k.rst, k.rst_inv);
+				if (!ok)
+					continue;
+				// keep chains acyclic and no longer than MAX_CASCADE in total
+				int len = 2;
+				for (Cell *c = prev; ok && pred.count(c); c = pred.at(c))
+					if (++len > MAX_CASCADE || pred.at(c) == next)
+						ok = false;
+				for (Cell *c = next; ok && succ.count(c); c = succ.at(c))
+					if (++len > MAX_CASCADE || succ.at(c) == prev)
+						ok = false;
+				if (!ok)
+					continue;
+				pred[next] = prev;
+				succ[prev] = next;
+				todo.emplace_back(prev, next, levels);
+				break;
+			}
+		}
+
+		for (auto &t : todo) {
+			Cell *prev = std::get<0>(t), *next = std::get<1>(t);
+			int levels = std::get<2>(t);
+			Wire *cascade = module->addWire(NEW_ID, k.width);
+			prev->setPort(k.cout, cascade);
+			prev->setParam(k.cascreg, levels);
+			next->setPort(k.port, Const(0, k.width));
+			next->setPort(k.cin, cascade);
+			next->setParam(k.input, Const("CASCADE"));
+			log("%sCOUT -> %sCIN cascade for %s -> %s (%sCASCREG=%d)\n", k.port == ID::A ? "A" : "B",
+					k.port == ID::A ? "A" : "B", prev, next, k.port == ID::A ? "A" : "B", levels);
+		}
+	}
 }
 
 struct XilinxDspPass : public Pass {
@@ -768,7 +1608,7 @@ struct XilinxDspPass : public Pass {
 		log("\n");
 		log("Experimental feature: the presence of a `$ge' cell attached to the registered\n");
 		log("P output implementing the operation \"(P >= <power-of-2>)\" will be transformed\n");
-		log("into using the DSP48E1's pattern detector feature for overflow detection.\n");
+		log("into using the DSP48E1's/DSP48E2's pattern detector feature for overflow detection.\n");
 		log("\n");
 		log("    -family {xcup|xcu|xc7|xc6v|xc5v|xc4v|xc6s|xc3sda}\n");
 		log("        select the family to target\n");
@@ -808,9 +1648,13 @@ struct XilinxDspPass : public Pass {
 			if (family == "xc7")
 				xilinx_simd_pack(module, module->selected_cells());
 
+			// Let the pre-adder see adder outputs that mul2dsp put on B
+			if (family == "xcu")
+				xilinx_dsp_swap_operands(module, module->selected_cells());
+
 			// Match for all features ([ABDMP][12]?REG, pre-adder,
 			// post-adder, pattern detector, etc.) except for CREG
-			if (family == "xc7") {
+			if (family == "xc7" || family == "xcu") {
 				xilinx_dsp_pm pm(module, module->selected_cells());
 				pm.run_xilinx_dsp_pack(xilinx_dsp_pack);
 			} else if (family == "xc6s" || family == "xc3sda") {
@@ -833,9 +1677,17 @@ struct XilinxDspPass : public Pass {
 			//   ACOUT -> ACIN, and BCOUT-> BCIN dedicated cascade
 			//   chains
 			{
+				if (family == "xcu") {
+					xilinx_dsp_break_cycles(module, module->selected_cells());
+					xilinx_dsp_shift_heads(module, module->selected_cells());
+				}
 				xilinx_dsp_cascade_pm pm(module, module->selected_cells());
 				pm.run_xilinx_dsp_cascade();
 			}
+			// ACOUT -> ACIN cascades for delayed A inputs (e.g. FIR delay
+			// lines) that the PCOUT -> PCIN driven matcher above cannot see
+			if (family == "xcu")
+				xilinx_dsp_abcascade(module, module->selected_cells());
 		}
 	}
 } XilinxDspPass;

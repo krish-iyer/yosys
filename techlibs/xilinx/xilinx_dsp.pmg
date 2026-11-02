@@ -1,7 +1,7 @@
 // This file describes the main pattern matcher setup (of three total) that
 //   forms the `xilinx_dsp` pass described in xilinx_dsp.cc
 // At a high level, it works as follows:
-//   ( 1) Starting from a DSP48E1 cell
+//   ( 1) Starting from a DSP48E1 or DSP48E2 cell
 //   ( 2) Match the driver of the 'A' input to a possible $sdffe cell (ADREG)
 //        If ADREG matched, treat 'A' input as input of ADREG
 //   ( 3) Match the driver of the 'A' and 'D' inputs for a possible $add cell
@@ -37,11 +37,11 @@
 //   (11) If PREG present, match for a greater-than-or-equal $ge cell attached
 //        to the 'P' output where it is compared to a constant that is a
 //        power-of-2: e.g. `assign overflow = (PREG >= 2**40);`
-//        In this scenario, the pattern detector functionality of a DSP48E1 can
+//        In this scenario, the pattern detector functionality of a DSP48E1/E2 can
 //        to implement this function
 // Notes:
 //   - The intention of this pattern matcher is for it to be compatible with
-//     DSP48E1 cells inferred from multiply operations by Yosys, as well as for
+//     DSP48E1/DSP48E2 cells inferred from multiply operations by Yosys, as well as for
 //     user instantiations that may already contain the cells being packed...
 //     (though the latter is currently untested)
 //   - Since the $sdffe pattern is used
@@ -57,6 +57,7 @@ pattern xilinx_dsp_pack
 state <SigBit> clock
 state <SigSpec> sigA sigB sigC sigD sigM sigP
 state <IdString> postAddAB postAddMuxAB
+state <int> postAddShift
 state <Cell*> ffAD ffA1 ffA2
 state <Cell*> ffB1 ffB2
 state <Cell*> ffD ffM ffP
@@ -66,10 +67,11 @@ state <SigSpec> argQ argD
 udata <SigSpec> dffD dffQ
 udata <SigBit> dffclock
 udata <Cell*> dff
+udata <bool> dffHasDupBits
 
-// (1) Starting from a DSP48E1 cell
+// (1) Starting from a DSP48E1 or DSP48E2 cell
 match dsp
-	select dsp->type.in(\DSP48E1)
+	select dsp->type.in(\DSP48E1, \DSP48E2)
 endmatch
 
 code sigA sigB sigC sigD sigM clock
@@ -129,19 +131,21 @@ endcode
 match preAdd
 	if sigD.empty() || sigD.is_fully_zero()
 	// Ensure that preAdder not already used
-	if param(dsp, \USE_DPORT).decode_string() == "FALSE"
+	if ((dsp->type == \DSP48E1) ? param(dsp, \USE_DPORT).decode_string() == "FALSE" : (param(dsp, \AMULTSEL).decode_string() == "A" && param(dsp, \BMULTSEL).decode_string() == "B"))
 	if port(dsp, \INMODE, Const(0, 5)).is_fully_zero()
 
 	select preAdd->type.in($add)
-	// Output has to be 25 bits or less
-	select GetSize(port(preAdd, \Y)) <= 25
+	// Output has to be 25 bits (DSP48E1) or 27 bits (DSP48E2) or less
+	select GetSize(port(preAdd, \Y)) <= 27
+	filter GetSize(port(preAdd, \Y)) <= (dsp->type == \DSP48E2 ? 27 : 25)
 	select nusers(port(preAdd, \Y)) == 2
 	choice <IdString> AB {\A, \B}
 	// A port has to be 30 bits or less
 	select GetSize(port(preAdd, AB)) <= 30
 	define <IdString> BA (AB == \A ? \B : \A)
-	// D port has to be 25 bits or less
-	select GetSize(port(preAdd, BA)) <= 25
+	// D port has to be 25 bits (DSP48E1) or 27 bits (DSP48E2) or less
+	select GetSize(port(preAdd, BA)) <= 27
+	filter GetSize(port(preAdd, BA)) <= (dsp->type == \DSP48E2 ? 27 : 25)
 	index <SigSpec> port(preAdd, \Y) === sigA
 
 	optional
@@ -159,15 +163,17 @@ endcode
 match preSub
 	if sigD.empty() || sigD.is_fully_zero()
 	// Ensure that preAdder not already used
-	if param(dsp, \USE_DPORT).decode_string() == "FALSE"
+	if ((dsp->type == \DSP48E1) ? param(dsp, \USE_DPORT).decode_string() == "FALSE" : (param(dsp, \AMULTSEL).decode_string() == "A" && param(dsp, \BMULTSEL).decode_string() == "B"))
 	if port(dsp, \INMODE, Const(0, 5)).is_fully_zero()
 
 	select preSub->type.in($sub)
-	// Output has to be 25 bits or less
-	select GetSize(port(preSub, \Y)) <= 25
+	// Output has to be 25 bits (DSP48E1) or 27 bits (DSP48E2) or less
+	select GetSize(port(preSub, \Y)) <= 27
+	filter GetSize(port(preSub, \Y)) <= (dsp->type == \DSP48E2 ? 27 : 25)
 	select nusers(port(preSub, \Y)) == 2
-	// D port has to be 25 bits or less
-	select GetSize(port(preSub, \A)) <= 25
+	// D port has to be 25 bits (DSP48E1) or 27 bits (DSP48E2) or less
+	select GetSize(port(preSub, \A)) <= 27
+	filter GetSize(port(preSub, \A)) <= (dsp->type == \DSP48E2 ? 27 : 25)
 	// A port has to be 30 bits or less
 	select GetSize(port(preSub, \B)) <= 30
 	index <SigSpec> port(preSub, \Y) === sigA
@@ -279,23 +285,49 @@ ffB1_end:				;
 endcode
 
 // (6) Match 'D' input for DREG
+//     DREG and ADREG share the same reset (RSTD), so only pack a DREG whose
+//     synchronous reset is identical to that of an already matched ADREG
 code argQ ffD sigD clock
 	if (param(dsp, \DREG).as_int() == 0) {
 		argQ = sigD;
 		subpattern(in_dffe);
 		if (dff) {
-			ffD = dff;
-			clock = dffclock;
-			sigD = dffD;
+			bool compatible = true;
+			if (ffAD) {
+				bool ad_rst = ffAD->type.in($sdff, $sdffe, $sdffce);
+				bool d_rst = dff->type.in($sdff, $sdffe, $sdffce);
+				if (ad_rst != d_rst)
+					compatible = false;
+				else if (ad_rst && (port(ffAD, \SRST) != port(dff, \SRST) ||
+						param(ffAD, \SRST_POLARITY) != param(dff, \SRST_POLARITY)))
+					compatible = false;
+				// a $sdffce reset is gated by its enable (RSTD = SRST & EN)
+				else if (ad_rst && (ffAD->type == $sdffce || dff->type == $sdffce) &&
+						(ffAD->type != dff->type || port(ffAD, \EN) != port(dff, \EN) ||
+						param(ffAD, \EN_POLARITY) != param(dff, \EN_POLARITY)))
+					compatible = false;
+			}
+			if (compatible) {
+				ffD = dff;
+				clock = dffclock;
+				sigD = dffD;
+			}
 		}
 	}
 endcode
 
 // (7) Match 'P' output that exclusively drives an MREG
+//     Registers with additional bits that duplicate the matched bits (e.g.
+//     sign-extension bits) cannot be absorbed into the MREG, since the MREG
+//     output is not otherwise observable and those bits would lose their driver
 code argD ffM sigM sigP clock
 	if (param(dsp, \MREG).as_int() == 0 && nusers(sigM) == 2) {
 		argD = sigM;
 		subpattern(out_dffe);
+		if (dff && dffHasDupBits) {
+			log_debug("Not packing %s as MREG: it has extra bits duplicating the multiplier output.\n", dff);
+			dff = nullptr;
+		}
 		if (dff) {
 			ffM = dff;
 			clock = dffclock;
@@ -311,21 +343,33 @@ endcode
 //     (note: 'P' -> 'C' connections that exist for accumulators are
 //      recognised in xilinx_dsp.cc).
 match postAdd
-	// Ensure that Z mux is not already used
-	if port(dsp, \OPMODE, SigSpec(0, 7)).extract(4,3).is_fully_zero()
+	// Ensure that Z mux is not already used (OPMODE[6:4] on both DSP48E1 and DSP48E2)
+	if port(dsp, \OPMODE, SigSpec(0, dsp->type == \DSP48E2 ? 9 : 7)).extract(4,3).is_fully_zero()
 
-	select postAdd->type.in($add)
+	// $sub is supported via ALUMODE (either operand may be the product)
+	select postAdd->type.in($add, $sub)
 	select GetSize(port(postAdd, \Y)) <= 48
 	choice <IdString> AB {\A, \B}
 	select nusers(port(postAdd, AB)) == 2
 
-	index <SigBit> port(postAdd, AB)[0] === sigP[0]
-	filter GetSize(port(postAdd, AB)) >= GetSize(sigP)
-	filter port(postAdd, AB).extract(0, GetSize(sigP)) == sigP
+	// sigP may sit at an offset ('shift') within the adder input, with constant
+	// zeros below it: opt_expr strips the zero LSBs of constant multiplicands
+	// (e.g. x * 3456 -> (x * 27) << 7). The shift is moved back into a
+	// multiplier operand when packing.
+	slice shift GetSize(port(postAdd, AB))
+	index <SigBit> port(postAdd, AB)[shift] === sigP[0]
+	filter shift == 0 || port(postAdd, AB).extract(0, shift).is_fully_zero()
+	filter GetSize(port(postAdd, AB)) >= shift + GetSize(sigP)
+	filter port(postAdd, AB).extract(shift, GetSize(sigP)) == sigP
 	// Check that remainder of AB is a sign- or zero-extension
-	filter port(postAdd, AB).extract_end(GetSize(sigP)) == SigSpec(sigP[GetSize(sigP)-1], GetSize(port(postAdd, AB))-GetSize(sigP)) || port(postAdd, AB).extract_end(GetSize(sigP)) == SigSpec(State::S0, GetSize(port(postAdd, AB))-GetSize(sigP))
+	filter port(postAdd, AB).extract_end(shift + GetSize(sigP)) == SigSpec(sigP[GetSize(sigP)-1], GetSize(port(postAdd, AB))-shift-GetSize(sigP)) || port(postAdd, AB).extract_end(shift + GetSize(sigP)) == SigSpec(State::S0, GetSize(port(postAdd, AB))-shift-GetSize(sigP))
+	filter shift == 0 || xilinx_dsp_can_shift(sigmap, dsp, shift, preAdd != nullptr || preSub != nullptr)
+	// The DSP adds its full product, so the (explicit or implicit) extension of
+	// sigP seen by the adder must agree with it (e.g. not a truncated product)
+	filter xilinx_dsp_postadd_ok(sigmap, dsp, port(postAdd, AB).extract_end(shift), param(postAdd, AB == \A ? \A_SIGNED : \B_SIGNED).as_bool(), GetSize(port(postAdd, \Y)) - shift, sigP)
 
 	set postAddAB AB
+	set postAddShift shift
 	optional
 endmatch
 
@@ -431,7 +475,7 @@ code
 endcode
 
 match ff
-	select ff->type.in($dff, $dffe, $sdff, $sdffe)
+	select ff->type.in($dff, $dffe, $sdff, $sdffe, $sdffce)
 	// DSP48E1 does not support clock inversion
 	select param(ff, \CLK_POLARITY).as_bool()
 
@@ -484,9 +528,13 @@ code
 endcode
 
 match ff
-	select ff->type.in($dff, $dffe, $sdff, $sdffe)
-	// DSP48E1 does not support clock inversion
+	select ff->type.in($dff, $dffe, $sdff, $sdffe, $sdffce)
+	// DSP48E1/E2 do not support clock inversion
 	select param(ff, \CLK_POLARITY).as_bool()
+
+	// Check that reset value, if present, is fully 0 (MREG/PREG can only
+	// be synchronously reset to zero)
+	filter ff->type.in($dff, $dffe) || param(ff, \SRST_VALUE).is_fully_zero()
 
 	slice offset GetSize(port(ff, \D))
 	index <SigBit> port(ff, \D)[offset] === argD[0]
@@ -512,6 +560,30 @@ code argQ
 			for (auto b : init.extract(c.offset, c.width))
 				if (b != State::Sx && b != State::S0)
 					reject;
+	}
+
+	// Find bits of this register outside of argQ whose 'D' is also one of
+	// the matched argD bits (e.g. sign-extension of argD). Once the register
+	// is absorbed these bits lose their driver, so they need to be re-driven
+	// from the DSP output (PREG) or the match abandoned (MREG). Such bits
+	// must not have a non-zero init value either.
+	dffHasDupBits = false;
+	{
+		pool<SigBit> matchedQ(argQ.begin(), argQ.end());
+		pool<SigBit> matchedD;
+		for (auto bit : sigmap(argD))
+			matchedD.insert(bit);
+		SigSpec ffD = sigmap(D);
+		for (int i = 0; i < GetSize(Q); i++) {
+			if (matchedQ.count(Q[i]) || !matchedD.count(ffD[i]))
+				continue;
+			dffHasDupBits = true;
+			if (Q[i].wire) {
+				Const init = Q[i].wire->attributes.at(\init, Const());
+				if (!init.empty() && init[Q[i].offset] == State::S1)
+					reject;
+			}
+		}
 	}
 
 	dff = ff;

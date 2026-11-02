@@ -3951,6 +3951,881 @@ module DSP48E1 (
 
 endmodule
 
+// UltraScale / UltraScale+.
+
+`ifdef YOSYS
+(* abc9_box=!(PREG || AREG || ADREG || BREG || CREG || DREG || MREG || CARRYINREG) *)
+`endif
+module DSP48E2(ACOUT, BCOUT, CARRYCASCOUT, CARRYOUT, MULTSIGNOUT, OVERFLOW, P, PATTERNBDETECT, PATTERNDETECT, PCOUT, UNDERFLOW, XOROUT, A, ACIN, ALUMODE, B, BCIN, C, CARRYCASCIN, CARRYIN, CARRYINSEL
+, CEA1, CEA2, CEAD, CEALUMODE, CEB1, CEB2, CEC, CECARRYIN, CECTRL, CED, CEINMODE, CEM, CEP, CLK, D, INMODE, MULTSIGNIN, OPMODE, PCIN, RSTA, RSTALLCARRYIN
+, RSTALUMODE, RSTB, RSTC, RSTCTRL, RSTD, RSTINMODE, RSTM, RSTP);
+    parameter integer ACASCREG = 1;
+    parameter integer ADREG = 1;
+    parameter integer ALUMODEREG = 1;
+    parameter AMULTSEL = "A";
+    parameter integer AREG = 1;
+    parameter AUTORESET_PATDET = "NO_RESET";
+    parameter AUTORESET_PRIORITY = "RESET";
+    parameter A_INPUT = "DIRECT";
+    parameter integer BCASCREG = 1;
+    parameter BMULTSEL = "B";
+    parameter integer BREG = 1;
+    parameter B_INPUT = "DIRECT";
+    parameter integer CARRYINREG = 1;
+    parameter integer CARRYINSELREG = 1;
+    parameter integer CREG = 1;
+    parameter integer DREG = 1;
+    parameter integer INMODEREG = 1;
+    parameter [3:0] IS_ALUMODE_INVERTED = 4'b0000;
+    parameter [0:0] IS_CARRYIN_INVERTED = 1'b0;
+    parameter [0:0] IS_CLK_INVERTED = 1'b0;
+    parameter [4:0] IS_INMODE_INVERTED = 5'b00000;
+    parameter [8:0] IS_OPMODE_INVERTED = 9'b000000000;
+    parameter [0:0] IS_RSTALLCARRYIN_INVERTED = 1'b0;
+    parameter [0:0] IS_RSTALUMODE_INVERTED = 1'b0;
+    parameter [0:0] IS_RSTA_INVERTED = 1'b0;
+    parameter [0:0] IS_RSTB_INVERTED = 1'b0;
+    parameter [0:0] IS_RSTCTRL_INVERTED = 1'b0;
+    parameter [0:0] IS_RSTC_INVERTED = 1'b0;
+    parameter [0:0] IS_RSTD_INVERTED = 1'b0;
+    parameter [0:0] IS_RSTINMODE_INVERTED = 1'b0;
+    parameter [0:0] IS_RSTM_INVERTED = 1'b0;
+    parameter [0:0] IS_RSTP_INVERTED = 1'b0;
+    parameter [47:0] MASK = 48'h3FFFFFFFFFFF;
+    parameter integer MREG = 1;
+    parameter integer OPMODEREG = 1;
+    parameter [47:0] PATTERN = 48'h000000000000;
+    parameter PREADDINSEL = "A";
+    parameter integer PREG = 1;
+    parameter [47:0] RND = 48'h000000000000;
+    parameter SEL_MASK = "MASK";
+    parameter SEL_PATTERN = "PATTERN";
+    parameter USE_MULT = "MULTIPLY";
+    parameter USE_PATTERN_DETECT = "NO_PATDET";
+    parameter USE_SIMD = "ONE48";
+    parameter USE_WIDEXOR = "FALSE";
+    parameter XORSIMD = "XOR24_48_96";
+    output [29:0] ACOUT;
+    output [17:0] BCOUT;
+    output CARRYCASCOUT;
+    output [3:0] CARRYOUT;
+    output MULTSIGNOUT;
+    output OVERFLOW;
+    output [47:0] P;
+    output PATTERNBDETECT;
+    output PATTERNDETECT;
+    output [47:0] PCOUT;
+    output UNDERFLOW;
+    output [7:0] XOROUT;
+    input [29:0] A;
+    input [29:0] ACIN;
+    (* invertible_pin = "IS_ALUMODE_INVERTED" *)
+    input [3:0] ALUMODE;
+    input [17:0] B;
+    input [17:0] BCIN;
+    input [47:0] C;
+    input CARRYCASCIN;
+    (* invertible_pin = "IS_CARRYIN_INVERTED" *)
+    input CARRYIN;
+    input [2:0] CARRYINSEL;
+    input CEA1;
+    input CEA2;
+    input CEAD;
+    input CEALUMODE;
+    input CEB1;
+    input CEB2;
+    input CEC;
+    input CECARRYIN;
+    input CECTRL;
+    input CED;
+    input CEINMODE;
+    input CEM;
+    input CEP;
+    (* clkbuf_sink *)
+    (* invertible_pin = "IS_CLK_INVERTED" *)
+    input CLK;
+    input [26:0] D;
+    (* invertible_pin = "IS_INMODE_INVERTED" *)
+    input [4:0] INMODE;
+    input MULTSIGNIN;
+    (* invertible_pin = "IS_OPMODE_INVERTED" *)
+    input [8:0] OPMODE;
+    input [47:0] PCIN;
+    (* invertible_pin = "IS_RSTA_INVERTED" *)
+    input RSTA;
+    (* invertible_pin = "IS_RSTALLCARRYIN_INVERTED" *)
+    input RSTALLCARRYIN;
+    (* invertible_pin = "IS_RSTALUMODE_INVERTED" *)
+    input RSTALUMODE;
+    (* invertible_pin = "IS_RSTB_INVERTED" *)
+    input RSTB;
+    (* invertible_pin = "IS_RSTC_INVERTED" *)
+    input RSTC;
+    (* invertible_pin = "IS_RSTCTRL_INVERTED" *)
+    input RSTCTRL;
+    (* invertible_pin = "IS_RSTD_INVERTED" *)
+    input RSTD;
+    (* invertible_pin = "IS_RSTINMODE_INVERTED" *)
+    input RSTINMODE;
+    (* invertible_pin = "IS_RSTM_INVERTED" *)
+    input RSTM;
+    (* invertible_pin = "IS_RSTP_INVERTED" *)
+    input RSTP;
+
+// BEGIN DSP48E2 functional model
+    //
+    // Behavioural model written from the UltraScale Architecture DSP Slice
+    // User Guide (UG579). Remarks:
+    //  - The multiplier is modelled as one 45-bit two's complement product
+    //    instead of two partial products. When OPMODE selects the multiplier
+    //    (X = Y = M) the four-input adder sees the product plus 2**48 (a reset
+    //    M register holds two zero partial products, i.e. no bias), so that
+    //    CARRYCASCOUT/MULTSIGNOUT follow the "software model" of UG579
+    //    chapter 5: they are the two carry bits (bits 48 and 49) of the full
+    //    sum of all adder operands. MACC_EXTEND (OPMODE = 9'b001001000) adds
+    //    CARRYCASCIN + 2*MULTSIGNIN - 1, which builds a 96-bit MACC from two
+    //    slices.
+    //  - CARRYOUT is computed from the full operand sum also where UG579
+    //    documents it as invalid (three/four-input additions, multiply).
+    //  - X is driven for outputs without a defined value: CARRYOUT bits that
+    //    do not belong to a SIMD segment, XOROUT while the multiplier is used,
+    //    OVERFLOW/UNDERFLOW with USE_PATTERN_DETECT = "NO_PATDET", and all
+    //    results of illegal OPMODE/ALUMODE selections.
+    //  - Corner cases not specified by UG579 follow the Xilinx simulation
+    //    model (verified by differential simulation): A1/B1 read as zero when
+    //    AREG/BREG = 0; with USE_MULT = "NONE" the D and AD registers are
+    //    bypassed; with NO_PATDET, PATTERNDETECT/PATTERNBDETECT read 1.
+    //  - GSR is not modelled; all registers start at zero.
+
+    initial begin
+`ifndef YOSYS
+        if (AREG != 0 && AREG != 1 && AREG != 2) $fatal(1, "DSP48E2: invalid AREG value");
+        if (BREG != 0 && BREG != 1 && BREG != 2) $fatal(1, "DSP48E2: invalid BREG value");
+        if ((AREG == 0 && ACASCREG != 0) || (AREG == 1 && ACASCREG != 1) || (AREG == 2 && ACASCREG != 1 && ACASCREG != 2))
+            $fatal(1, "DSP48E2: invalid ACASCREG value for this AREG");
+        if ((BREG == 0 && BCASCREG != 0) || (BREG == 1 && BCASCREG != 1) || (BREG == 2 && BCASCREG != 1 && BCASCREG != 2))
+            $fatal(1, "DSP48E2: invalid BCASCREG value for this BREG");
+        if (ADREG != 0 && ADREG != 1) $fatal(1, "DSP48E2: invalid ADREG value");
+        if (ALUMODEREG != 0 && ALUMODEREG != 1) $fatal(1, "DSP48E2: invalid ALUMODEREG value");
+        if (CARRYINREG != 0 && CARRYINREG != 1) $fatal(1, "DSP48E2: invalid CARRYINREG value");
+        if (CARRYINSELREG != 0 && CARRYINSELREG != 1) $fatal(1, "DSP48E2: invalid CARRYINSELREG value");
+        if (CREG != 0 && CREG != 1) $fatal(1, "DSP48E2: invalid CREG value");
+        if (DREG != 0 && DREG != 1) $fatal(1, "DSP48E2: invalid DREG value");
+        if (INMODEREG != 0 && INMODEREG != 1) $fatal(1, "DSP48E2: invalid INMODEREG value");
+        if (MREG != 0 && MREG != 1) $fatal(1, "DSP48E2: invalid MREG value");
+        if (OPMODEREG != 0 && OPMODEREG != 1) $fatal(1, "DSP48E2: invalid OPMODEREG value");
+        if (PREG != 0 && PREG != 1) $fatal(1, "DSP48E2: invalid PREG value");
+        if (A_INPUT != "DIRECT" && A_INPUT != "CASCADE") $fatal(1, "DSP48E2: invalid A_INPUT value");
+        if (B_INPUT != "DIRECT" && B_INPUT != "CASCADE") $fatal(1, "DSP48E2: invalid B_INPUT value");
+        if (AMULTSEL != "A" && AMULTSEL != "AD") $fatal(1, "DSP48E2: invalid AMULTSEL value");
+        if (BMULTSEL != "B" && BMULTSEL != "AD") $fatal(1, "DSP48E2: invalid BMULTSEL value");
+        if (PREADDINSEL != "A" && PREADDINSEL != "B") $fatal(1, "DSP48E2: invalid PREADDINSEL value");
+        if (USE_MULT != "MULTIPLY" && USE_MULT != "DYNAMIC" && USE_MULT != "NONE") $fatal(1, "DSP48E2: invalid USE_MULT value");
+        if (USE_SIMD != "ONE48" && USE_SIMD != "TWO24" && USE_SIMD != "FOUR12") $fatal(1, "DSP48E2: invalid USE_SIMD value");
+        if (USE_WIDEXOR != "FALSE" && USE_WIDEXOR != "TRUE") $fatal(1, "DSP48E2: invalid USE_WIDEXOR value");
+        if (XORSIMD != "XOR24_48_96" && XORSIMD != "XOR12") $fatal(1, "DSP48E2: invalid XORSIMD value");
+        if (AUTORESET_PATDET != "NO_RESET" && AUTORESET_PATDET != "RESET_MATCH" && AUTORESET_PATDET != "RESET_NOT_MATCH")
+            $fatal(1, "DSP48E2: invalid AUTORESET_PATDET value");
+        if (AUTORESET_PRIORITY != "RESET" && AUTORESET_PRIORITY != "CEP") $fatal(1, "DSP48E2: invalid AUTORESET_PRIORITY value");
+        if (SEL_MASK != "MASK" && SEL_MASK != "C" && SEL_MASK != "ROUNDING_MODE1" && SEL_MASK != "ROUNDING_MODE2")
+            $fatal(1, "DSP48E2: invalid SEL_MASK value");
+        if (SEL_PATTERN != "PATTERN" && SEL_PATTERN != "C") $fatal(1, "DSP48E2: invalid SEL_PATTERN value");
+        if (USE_PATTERN_DETECT != "NO_PATDET" && USE_PATTERN_DETECT != "PATDET") $fatal(1, "DSP48E2: invalid USE_PATTERN_DETECT value");
+        if (USE_MULT == "NONE" && MREG != 0) $fatal(1, "DSP48E2: MREG must be 0 when USE_MULT is NONE");
+`endif
+    end
+
+    // Programmable inversions.
+    wire clk = CLK ^ IS_CLK_INVERTED;
+    wire [3:0] ALUMODE_in = ALUMODE ^ IS_ALUMODE_INVERTED;
+    wire [4:0] INMODE_in = INMODE ^ IS_INMODE_INVERTED;
+    wire [8:0] OPMODE_in = OPMODE ^ IS_OPMODE_INVERTED;
+    wire CARRYIN_in = CARRYIN ^ IS_CARRYIN_INVERTED;
+    wire RSTA_in = RSTA ^ IS_RSTA_INVERTED;
+    wire RSTALLCARRYIN_in = RSTALLCARRYIN ^ IS_RSTALLCARRYIN_INVERTED;
+    wire RSTALUMODE_in = RSTALUMODE ^ IS_RSTALUMODE_INVERTED;
+    wire RSTB_in = RSTB ^ IS_RSTB_INVERTED;
+    wire RSTC_in = RSTC ^ IS_RSTC_INVERTED;
+    wire RSTCTRL_in = RSTCTRL ^ IS_RSTCTRL_INVERTED;
+    wire RSTD_in = RSTD ^ IS_RSTD_INVERTED;
+    wire RSTINMODE_in = RSTINMODE ^ IS_RSTINMODE_INVERTED;
+    wire RSTM_in = RSTM ^ IS_RSTM_INVERTED;
+    wire RSTP_in = RSTP ^ IS_RSTP_INVERTED;
+
+    // A and B input registers (UG579 Figures 2-5 and 2-6). A2/B2 are the
+    // AREG/BREG selected outputs, used by the X mux (A:B) and, with
+    // INMODE[0]/INMODE[4] = 0, by the multiplier and pre-adder. A1/B1 is the
+    // first register stage, selected with INMODE[0]/INMODE[4] = 1. With
+    // AREG/BREG = 1 the A1/B1 register is loaded in parallel with A2/B2
+    // (enabled by CEA1/CEB1); with AREG/BREG = 0 there is no A1/B1 register
+    // and selecting it gives zero.
+    wire [29:0] A_muxed = (A_INPUT == "CASCADE") ? ACIN : A;
+    wire [17:0] B_muxed = (B_INPUT == "CASCADE") ? BCIN : B;
+    reg [29:0] A1r, A2r;
+    reg [17:0] B1r, B2r;
+    wire [29:0] A1, A2;
+    wire [17:0] B1, B2;
+
+    generate
+        if (AREG == 0) begin
+            assign A1 = 30'b0;
+            assign A2 = A_muxed;
+        end else begin
+            initial A1r = 30'b0;
+            initial A2r = 30'b0;
+            always @(posedge clk)
+                if (RSTA_in) begin
+                    A1r <= 30'b0;
+                    A2r <= 30'b0;
+                end else begin
+                    if (CEA1) A1r <= A_muxed;
+                    if (CEA2) A2r <= (AREG == 2) ? A1r : A_muxed;
+                end
+            assign A1 = A1r;
+            assign A2 = A2r;
+        end
+
+        if (BREG == 0) begin
+            assign B1 = 18'b0;
+            assign B2 = B_muxed;
+        end else begin
+            initial B1r = 18'b0;
+            initial B2r = 18'b0;
+            always @(posedge clk)
+                if (RSTB_in) begin
+                    B1r <= 18'b0;
+                    B2r <= 18'b0;
+                end else begin
+                    if (CEB1) B1r <= B_muxed;
+                    if (CEB2) B2r <= (BREG == 2) ? B1r : B_muxed;
+                end
+            assign B1 = B1r;
+            assign B2 = B2r;
+        end
+
+        // Cascade outputs: ACASCREG/BCASCREG = 1 with AREG/BREG = 2 taps the first stage.
+        if (AREG == 2 && ACASCREG == 1) assign ACOUT = A1;
+        else assign ACOUT = A2;
+        if (BREG == 2 && BCASCREG == 1) assign BCOUT = B1;
+        else assign BCOUT = B2;
+    endgenerate
+
+    // C, D and control input registers.
+    // With USE_MULT = "NONE" the D and AD registers are bypassed; their only
+    // observable effect is then the A[26] XNOR B[17] rounding carry
+    // (CARRYINSEL = 110). This follows the Xilinx simulation model.
+    localparam DREG_EFF = (USE_MULT == "NONE") ? 0 : DREG;
+    localparam ADREG_EFF = (USE_MULT == "NONE") ? 0 : ADREG;
+    reg [47:0] Cr;
+    reg [26:0] Dr;
+    reg [4:0] INMODEr;
+    reg [8:0] OPMODEr;
+    reg [3:0] ALUMODEr;
+    reg [2:0] CARRYINSELr;
+    reg CARRYINr;
+
+    generate
+        if (CREG == 1) begin
+            initial Cr = 48'b0;
+            always @(posedge clk) if (RSTC_in) Cr <= 48'b0; else if (CEC) Cr <= C;
+        end else
+            always @* Cr = C;
+
+        if (DREG_EFF == 1) begin
+            initial Dr = 27'b0;
+            always @(posedge clk) if (RSTD_in) Dr <= 27'b0; else if (CED) Dr <= D;
+        end else
+            always @* Dr = D;
+
+        if (INMODEREG == 1) begin
+            initial INMODEr = 5'b0;
+            always @(posedge clk) if (RSTINMODE_in) INMODEr <= 5'b0; else if (CEINMODE) INMODEr <= INMODE_in;
+        end else
+            always @* INMODEr = INMODE_in;
+
+        if (OPMODEREG == 1) begin
+            initial OPMODEr = 9'b0;
+            always @(posedge clk) if (RSTCTRL_in) OPMODEr <= 9'b0; else if (CECTRL) OPMODEr <= OPMODE_in;
+        end else
+            always @* OPMODEr = OPMODE_in;
+
+        if (ALUMODEREG == 1) begin
+            initial ALUMODEr = 4'b0;
+            always @(posedge clk) if (RSTALUMODE_in) ALUMODEr <= 4'b0; else if (CEALUMODE) ALUMODEr <= ALUMODE_in;
+        end else
+            always @* ALUMODEr = ALUMODE_in;
+
+        if (CARRYINSELREG == 1) begin
+            initial CARRYINSELr = 3'b0;
+            always @(posedge clk) if (RSTCTRL_in) CARRYINSELr <= 3'b0; else if (CECTRL) CARRYINSELr <= CARRYINSEL;
+        end else
+            always @* CARRYINSELr = CARRYINSEL;
+
+        if (CARRYINREG == 1) begin
+            initial CARRYINr = 1'b0;
+            always @(posedge clk) if (RSTALLCARRYIN_in) CARRYINr <= 1'b0; else if (CECARRYIN) CARRYINr <= CARRYIN_in;
+        end else
+            always @* CARRYINr = CARRYIN_in;
+    endgenerate
+
+    // Pre-adder and multiplier operand selection (UG579 Figures 2-5/2-6,
+    // Tables 2-1/2-2). INMODE[1] gates the A path if PREADDINSEL = "A" and
+    // the B path if PREADDINSEL = "B".
+    wire inmode1_a = (PREADDINSEL == "A") ? INMODEr[1] : 1'b0;
+    wire inmode1_b = (PREADDINSEL == "B") ? INMODEr[1] : 1'b0;
+    wire [26:0] A2A1 = INMODEr[0] ? A1[26:0] : A2[26:0];
+    wire [17:0] B2B1 = INMODEr[4] ? B1 : B2;
+    wire [26:0] A_gated = inmode1_a ? 27'b0 : A2A1;
+    wire [17:0] B_gated = inmode1_b ? 18'b0 : B2B1;
+    wire [26:0] PREADD_AB = (PREADDINSEL == "B") ? {{9{B_gated[17]}}, B_gated} : A_gated;
+    wire [26:0] D_gated = INMODEr[2] ? Dr : 27'b0;
+    wire [26:0] AD_data = INMODEr[3] ? (D_gated - PREADD_AB) : (D_gated + PREADD_AB);
+    reg [26:0] ADr;
+
+    generate
+        if (ADREG_EFF == 1) begin
+            initial ADr = 27'b0;
+            always @(posedge clk) if (RSTD_in) ADr <= 27'b0; else if (CEAD) ADr <= AD_data;
+        end else
+            always @* ADr = AD_data;
+    endgenerate
+
+    // 27x18 two's complement multiplier and M register.
+    wire [26:0] A_mult = (AMULTSEL == "AD") ? ADr : A_gated;
+    wire [17:0] B_mult = (BMULTSEL == "AD") ? ADr[17:0] : B_gated;
+    wire signed [44:0] M_prod = $signed(A_mult) * $signed(B_mult);
+    wire [44:0] M_d = (USE_MULT == "NONE") ? 45'b0 : M_prod;
+    // The 2**48 term of the partial products (see above).
+    wire M_bias_d = ~M_d[44];
+    // Symmetric rounding carry (CARRYINSEL = 110), pipelined like the M
+    // register but reset by RSTALLCARRYIN.
+    wire round_ab_d = ~(A_mult[26] ^ B_mult[17]);
+    reg [44:0] Mr;
+    reg M_bias;
+    reg round_ab;
+
+    generate
+        if (MREG == 1) begin
+            initial Mr = 45'b0;
+            initial M_bias = 1'b0;
+            initial round_ab = 1'b0;
+            always @(posedge clk) begin
+                if (RSTM_in) begin
+                    Mr <= 45'b0;
+                    M_bias <= 1'b0;
+                end else if (CEM) begin
+                    Mr <= M_d;
+                    M_bias <= M_bias_d;
+                end
+                if (RSTALLCARRYIN_in) round_ab <= 1'b0; else if (CEM) round_ab <= round_ab_d;
+            end
+        end else
+            always @* begin
+                Mr = M_d;
+                M_bias = M_bias_d;
+                round_ab = round_ab_d;
+            end
+    endgenerate
+
+    // Output (P) register stage outputs, used for feedback below.
+    reg [47:0] P_r;
+    reg [3:0] CARRYOUT_r;
+    reg CARRYCASCOUT_r, MULTSIGNOUT_r, PATTERNDETECT_r, PATTERNBDETECT_r;
+    reg [7:0] XOROUT_r;
+
+    // W, X, Y and Z multiplexers (UG579 Tables 2-3 to 2-6).
+    wire use_m = (OPMODEr[1:0] == 2'b01);
+    wire macc_extend = (OPMODEr[6:4] == 3'b100);
+    wire [47:0] P_fb = (PREG == 1) ? P_r : 48'bx;  // P feedback requires PREG = 1
+    reg [47:0] W, X, Y, Z;
+    reg mux_illegal;
+
+    always @* begin
+        mux_illegal = 1'b0;
+        case (OPMODEr[1:0])
+            // MACC_EXTEND: X carries MULTSIGNIN with weight 2, so that with Y
+            // all ones the slice adds CARRYCASCIN + 2*MULTSIGNIN - 1.
+            2'b00: X = macc_extend ? {46'b0, MULTSIGNIN, 1'b0} : 48'b0;
+            2'b01: X = {{3{Mr[44]}}, Mr};
+            2'b10: X = P_fb;
+            default: X = {A2, B2};
+        endcase
+        case (OPMODEr[3:2])
+            2'b00: Y = 48'b0;
+            2'b01: Y = 48'b0;  // the whole product is carried on X
+            2'b10: Y = {48{1'b1}};
+            default: Y = Cr;
+        endcase
+        // X and Y must select M together; the multiplier needs
+        // USE_MULT = MULTIPLY/DYNAMIC and USE_SIMD = ONE48.
+        if (use_m != (OPMODEr[3:2] == 2'b01)) mux_illegal = 1'b1;
+        if (use_m && (USE_MULT == "NONE" || USE_SIMD != "ONE48")) mux_illegal = 1'b1;
+        case (OPMODEr[6:4])
+            3'b000: Z = 48'b0;
+            3'b001: Z = PCIN;
+            3'b010: Z = P_fb;
+            3'b011: Z = Cr;
+            3'b100: begin
+                // MACC_EXTEND, only valid as OPMODE = 9'b001001000.
+                Z = P_fb;
+                if (OPMODEr[8:7] != 2'b00 || OPMODEr[3:0] != 4'b1000) mux_illegal = 1'b1;
+            end
+            3'b101: Z = {{17{PCIN[47]}}, PCIN[47:17]};
+            3'b110: Z = {{17{P_fb[47]}}, P_fb[47:17]};
+            default: begin
+                Z = 48'bx;
+                mux_illegal = 1'b1;
+            end
+        endcase
+        case (OPMODEr[8:7])
+            2'b00: W = 48'b0;
+            2'b01: W = P_fb;
+            2'b10: W = RND;
+            default: W = Cr;
+        endcase
+    end
+
+    // Carry input selection (UG579 Table 2-8).
+    reg cin;
+    always @* begin
+        case (CARRYINSELr)
+            3'b000: cin = CARRYINr;
+            3'b001: cin = ~PCIN[47];
+            3'b010: cin = CARRYCASCIN;
+            3'b011: cin = PCIN[47];
+            3'b100: cin = (PREG == 1) ? CARRYCASCOUT_r : 1'bx;
+            3'b101: cin = ~P_fb[47];
+            3'b110: cin = round_ab;
+            default: cin = P_fb[47];
+        endcase
+    end
+
+    // Four-input adder / logic unit. ALUMODE[0] inverts Z, ALUMODE[1] inverts
+    // the result (UG579 Figure 5-3, Tables 2-7 and 2-10).
+    wire [47:0] Z_alu = ALUMODEr[0] ? ~Z : Z;
+
+    // The adder works on four 12-bit segments, each producing two carry bits
+    // (a sum of four operands needs two); USE_SIMD selects the segment
+    // boundaries that propagate carries.
+    wire [55:0] seg_sum;
+    wire [7:0] seg_cin;
+    genvar i;
+    generate
+        for (i = 0; i < 4; i = i + 1) begin : segment
+            assign seg_sum[14*i +: 14] = W[12*i +: 12] + X[12*i +: 12] + Y[12*i +: 12] + Z_alu[12*i +: 12] + seg_cin[2*i +: 2];
+        end
+        assign seg_cin[1:0] = {1'b0, cin};
+        if (USE_SIMD == "FOUR12")
+            assign seg_cin[7:2] = 6'b0;
+        else if (USE_SIMD == "TWO24")
+            assign seg_cin[7:2] = {seg_sum[41:40], 2'b00, seg_sum[13:12]};
+        else
+            assign seg_cin[7:2] = {seg_sum[41:40], seg_sum[27:26], seg_sum[13:12]};
+    endgenerate
+    wire [47:0] adder_sum = {seg_sum[53:42], seg_sum[39:28], seg_sum[25:14], seg_sum[11:0]};
+    // Bits 49:48 of the full sum, including the 2**48 multiplier term.
+    wire [1:0] adder_top = seg_sum[55:54] + {1'b0, use_m & M_bias};
+
+    // Logic unit: X op Z with Y = 0 or all ones, and XOR3 with Y = C; the
+    // carry chain is not used.
+    wire [47:0] logic_xor = X ^ Y ^ Z_alu;
+    wire [47:0] logic_and = (X & Y) | (X & Z_alu) | (Y & Z_alu);
+
+    reg [47:0] alu_out;
+    reg [3:0] carry_seg;
+    reg [1:0] carry_top;
+    always @* begin
+        carry_seg = 4'bxxxx;
+        carry_top = 2'b00;
+        case (ALUMODEr[3:2])
+            2'b00: begin
+                alu_out = adder_sum;
+                carry_top = adder_top;
+                if (USE_SIMD == "FOUR12")
+                    carry_seg = {adder_top[0], seg_sum[40], seg_sum[26], seg_sum[12]};
+                else if (USE_SIMD == "TWO24")
+                    carry_seg = {adder_top[0], 1'bx, seg_sum[26], 1'bx};
+                else
+                    carry_seg = {adder_top[0], 3'bxxx};
+            end
+            2'b01: begin
+                alu_out = logic_xor;
+                carry_seg = 4'b0xxx;
+            end
+            2'b11: begin
+                alu_out = logic_and;
+                carry_seg = 4'b0xxx;
+            end
+            default: begin
+                alu_out = 48'bx;
+                carry_top = 2'bxx;
+            end
+        endcase
+        // The logic unit needs W = 0 and no multiplier.
+        if (ALUMODEr[3:2] != 2'b00 && (OPMODEr[8:7] != 2'b00 || use_m)) begin
+            alu_out = 48'bx;
+            carry_top = 2'bxx;
+        end
+        if (mux_illegal) begin
+            alu_out = 48'bx;
+            carry_seg = 4'bxxxx;
+            carry_top = 2'bxx;
+        end
+    end
+
+    wire [47:0] P_d = ALUMODEr[1] ? ~alu_out : alu_out;
+    // CARRYOUT follows the fabric (borrow) convention for ALUMODE = 0011,
+    // CARRYCASCOUT keeps the polarity of the internal calculation (UG579
+    // Table 5-1).
+    wire [3:0] CARRYOUT_d = carry_seg ^ {4{ALUMODEr[1] & ALUMODEr[0]}};
+    wire CARRYCASCOUT_d = carry_top[0];
+    wire MULTSIGNOUT_d = carry_top[1];
+
+    // Wide XOR (UG579 Figure 2-19, Table 2-11), on the X/Y/Z compressor sum.
+    wire [47:0] xor_s = X ^ Y ^ Z_alu;
+    wire [7:0] xor12 = {^xor_s[47:42], ^xor_s[41:36], ^xor_s[35:30], ^xor_s[29:24],
+                        ^xor_s[23:18], ^xor_s[17:12], ^xor_s[11:6], ^xor_s[5:0]};
+    wire [7:0] xor_wide = {xor12[7], ^xor_s[47:36], ^xor_s[47:24], ^xor_s[35:24],
+                           ^xor_s[47:0], ^xor_s[23:12], ^xor_s[23:0], ^xor_s[11:0]};
+    wire [7:0] XOROUT_d = (USE_WIDEXOR != "TRUE") ? 8'b0 :
+                          (use_m || mux_illegal) ? 8'bx :
+                          (XORSIMD == "XOR12") ? xor12 : xor_wide;
+
+    // Pattern detector (UG579 Figure 2-15).
+    wire use_patdet = (USE_PATTERN_DETECT == "PATDET");
+    wire [47:0] pd_pattern = (SEL_PATTERN == "C") ? Cr : PATTERN;
+    wire [47:0] pd_mask = (SEL_MASK == "C") ? Cr :
+                          (SEL_MASK == "ROUNDING_MODE1") ? {~Cr[46:0], 1'b0} :
+                          (SEL_MASK == "ROUNDING_MODE2") ? {~Cr[45:0], 2'b00} :
+                          MASK;
+    wire PATTERNDETECT_d = use_patdet ? &(~(P_d ^ pd_pattern) | pd_mask) : 1'b1;
+    wire PATTERNBDETECT_d = use_patdet ? &((P_d ^ pd_pattern) | pd_mask) : 1'b1;
+
+    // Output register stage (PREG), including the pattern detector history
+    // and its automatic reset of the P register.
+    reg PATTERNDETECTPAST, PATTERNBDETECTPAST;
+    generate
+        if (PREG == 1) begin
+            wire autoreset = (AUTORESET_PATDET == "RESET_MATCH") ? PATTERNDETECT_r :
+                             (AUTORESET_PATDET == "RESET_NOT_MATCH") ? (PATTERNDETECTPAST & ~PATTERNDETECT_r) :
+                             1'b0;
+            wire autoreset_en = (AUTORESET_PRIORITY == "CEP") ? (autoreset & CEP) : autoreset;
+            initial begin
+                P_r = 48'b0;
+                CARRYOUT_r = 4'b0;
+                CARRYCASCOUT_r = 1'b0;
+                MULTSIGNOUT_r = 1'b0;
+                XOROUT_r = 8'b0;
+                PATTERNDETECT_r = 1'b0;
+                PATTERNBDETECT_r = 1'b0;
+                PATTERNDETECTPAST = 1'b0;
+                PATTERNBDETECTPAST = 1'b0;
+            end
+            always @(posedge clk)
+                if (RSTP_in || autoreset_en) begin
+                    P_r <= 48'b0;
+                    CARRYOUT_r <= 4'b0;
+                    CARRYCASCOUT_r <= 1'b0;
+                    MULTSIGNOUT_r <= 1'b0;
+                    XOROUT_r <= 8'b0;
+                    PATTERNDETECT_r <= 1'b0;
+                    PATTERNBDETECT_r <= 1'b0;
+                    PATTERNDETECTPAST <= 1'b0;
+                    PATTERNBDETECTPAST <= 1'b0;
+                end else if (CEP) begin
+                    P_r <= P_d;
+                    CARRYOUT_r <= CARRYOUT_d;
+                    CARRYCASCOUT_r <= CARRYCASCOUT_d;
+                    MULTSIGNOUT_r <= MULTSIGNOUT_d;
+                    XOROUT_r <= XOROUT_d;
+                    PATTERNDETECT_r <= PATTERNDETECT_d;
+                    PATTERNBDETECT_r <= PATTERNBDETECT_d;
+                    PATTERNDETECTPAST <= PATTERNDETECT_r;
+                    PATTERNBDETECTPAST <= PATTERNBDETECT_r;
+                end
+            assign OVERFLOW = use_patdet ? (PATTERNDETECTPAST & ~PATTERNDETECT_r & ~PATTERNBDETECT_r) : 1'bx;
+            assign UNDERFLOW = use_patdet ? (PATTERNBDETECTPAST & ~PATTERNDETECT_r & ~PATTERNBDETECT_r) : 1'bx;
+        end else begin
+            always @* begin
+                P_r = P_d;
+                CARRYOUT_r = CARRYOUT_d;
+                CARRYCASCOUT_r = CARRYCASCOUT_d;
+                MULTSIGNOUT_r = MULTSIGNOUT_d;
+                XOROUT_r = XOROUT_d;
+                PATTERNDETECT_r = PATTERNDETECT_d;
+                PATTERNBDETECT_r = PATTERNBDETECT_d;
+            end
+            // OVERFLOW/UNDERFLOW need PREG = 1.
+            assign OVERFLOW = use_patdet ? 1'b0 : 1'bx;
+            assign UNDERFLOW = use_patdet ? 1'b0 : 1'bx;
+        end
+    endgenerate
+
+    assign P = P_r;
+    assign PCOUT = P_r;
+    assign CARRYOUT = CARRYOUT_r;
+    assign CARRYCASCOUT = CARRYCASCOUT_r;
+    assign MULTSIGNOUT = MULTSIGNOUT_r;
+    assign XOROUT = XOROUT_r;
+    assign PATTERNDETECT = PATTERNDETECT_r;
+    assign PATTERNBDETECT = PATTERNBDETECT_r;
+
+    // END DSP48E2 functional model
+
+`ifdef YOSYS
+    // configuration classes used by the timing functions below
+    localparam TM_MULT   = USE_MULT != "NONE";                                      // multiplier in the P path
+    localparam TM_PREADD = TM_MULT && (AMULTSEL == "AD" || BMULTSEL == "AD");       // pre-adder output used
+    localparam TM_A_PRE  = TM_PREADD && PREADDINSEL == "A";                         // A -> pre-adder -> multiplier
+    localparam TM_B_PRE  = TM_PREADD && PREADDINSEL == "B";                         // B -> pre-adder -> multiplier
+    localparam TM_A_DIR  = TM_MULT && AMULTSEL == "A";                              // A -> multiplier
+    localparam TM_B_DIR  = TM_MULT && BMULTSEL == "B";                              // B -> multiplier
+    localparam TM_A_MUL  = TM_A_PRE || TM_A_DIR;
+    localparam TM_B_MUL  = TM_B_PRE || TM_B_DIR;
+    localparam TM_PATDET = USE_PATTERN_DETECT != "NO_PATDET";
+
+    function integer \A.required ;
+    begin
+        \A.required = 0;
+        // first register reached by A (worst case where A fans out to two stages)
+        if (AREG != 0)                                               \A.required =  299;
+        else if (TM_A_PRE && ADREG == 0 && MREG == 0 && PREG != 0)    \A.required = TM_PATDET ? 2222 : 2083;
+        else if (TM_A_DIR && MREG == 0 && PREG != 0)                  \A.required = TM_PATDET ? 1529 : 1390;
+        else if (TM_A_PRE && ADREG == 0 && MREG != 0)                 \A.required = 1451;
+        else if (TM_A_PRE && ADREG != 0)                              \A.required =  775;
+        else if (TM_A_DIR && MREG != 0)                               \A.required =  761;
+        else if (!TM_A_MUL && PREG != 0)                              \A.required = TM_PATDET ?  856 :  717;
+    end
+    endfunction
+    function integer \B.required ;
+    begin
+        \B.required = 0;
+        if (BREG != 0)                                               \B.required =  292;
+        else if (TM_B_PRE && ADREG == 0 && MREG == 0 && PREG != 0)    \B.required = TM_PATDET ? 2177 : 2038;
+        else if (TM_B_DIR && MREG == 0 && PREG != 0)                  \B.required = TM_PATDET ? 1574 : 1435;
+        else if (TM_B_PRE && ADREG == 0 && MREG != 0)                 \B.required = 1406;
+        else if (TM_B_DIR && MREG != 0)                               \B.required =  819;
+        else if (TM_B_PRE && ADREG != 0)                              \B.required =  730;
+        else if (!TM_B_MUL && PREG != 0)                              \B.required = TM_PATDET ?  830 :  691;
+    end
+    endfunction
+    function integer \C.required ;
+    begin
+        \C.required = 0;
+        if (CREG != 0)      \C.required =  256;
+        else if (PREG != 0) \C.required = TM_PATDET ? 814 : 675;
+    end
+    endfunction
+    function integer \D.required ;
+    begin
+        \D.required = 0;
+        if (TM_PREADD) begin
+            if (DREG != 0)       \D.required =  266;
+            else if (ADREG != 0) \D.required =  735;
+            else if (MREG != 0)  \D.required = 1411;
+            else if (PREG != 0)  \D.required = TM_PATDET ? 2182 : 2043;
+        end
+    end
+    endfunction
+    function integer \PCIN.required ;
+    begin
+        \PCIN.required = 0;
+        if (PREG != 0) \PCIN.required = TM_PATDET ? 670 : 531;
+    end
+    endfunction
+    function integer \CARRYIN.required ;
+    begin
+        \CARRYIN.required = 0;
+        if (CARRYINREG != 0) \CARRYIN.required = 176;
+        else if (PREG != 0)  \CARRYIN.required = TM_PATDET ? 641 : 502;
+    end
+    endfunction
+    function integer \P.arrival ;
+    begin
+        \P.arrival = 0;
+        if (PREG != 0)                                        \P.arrival =  277;
+        // PREG=0: worst case over the registers that reach P combinationally
+        else if (MREG == 0 && TM_A_PRE && ADREG == 0 && AREG != 0) \P.arrival = 2249;
+        else if (MREG == 0 && TM_B_PRE && ADREG == 0 && BREG != 0) \P.arrival = 2223;
+        else if (MREG == 0 && TM_PREADD && ADREG == 0 && DREG != 0) \P.arrival = 2097;
+        else if (MREG == 0 && TM_B_DIR && BREG != 0)               \P.arrival = 1620;
+        else if (MREG == 0 && TM_A_DIR && AREG != 0)               \P.arrival = 1556;
+        else if (MREG == 0 && TM_PREADD && ADREG != 0)             \P.arrival = 1543;
+        else if (CARRYINREG != 0)                                 \P.arrival = 1002;
+        else if (MREG != 0 && TM_MULT)                             \P.arrival =  957;
+        else if (CREG != 0)                                       \P.arrival =  886;
+        else if (!TM_A_MUL && AREG != 0)                           \P.arrival =  883;
+        else if (!TM_B_MUL && BREG != 0)                           \P.arrival =  871;
+    end
+    endfunction
+    function integer \PCOUT.arrival ;
+    begin
+        \PCOUT.arrival = 0;
+        if (PREG != 0)                                        \PCOUT.arrival =  239;
+        else if (MREG == 0 && TM_A_PRE && ADREG == 0 && AREG != 0) \PCOUT.arrival = 2262;
+        else if (MREG == 0 && TM_B_PRE && ADREG == 0 && BREG != 0) \PCOUT.arrival = 2236;
+        else if (MREG == 0 && TM_PREADD && ADREG == 0 && DREG != 0) \PCOUT.arrival = 2110;
+        else if (MREG == 0 && TM_B_DIR && BREG != 0)               \PCOUT.arrival = 1633;
+        else if (MREG == 0 && TM_A_DIR && AREG != 0)               \PCOUT.arrival = 1569;
+        else if (MREG == 0 && TM_PREADD && ADREG != 0)             \PCOUT.arrival = 1556;
+        else if (CARRYINREG != 0)                                 \PCOUT.arrival = 1015;
+        else if (MREG != 0 && TM_MULT)                             \PCOUT.arrival =  970;
+        else if (CREG != 0)                                       \PCOUT.arrival =  899;
+        else if (!TM_A_MUL && AREG != 0)                           \PCOUT.arrival =  896;
+        else if (!TM_B_MUL && BREG != 0)                           \PCOUT.arrival =  884;
+    end
+    endfunction
+    function integer \A.P.comb ;
+    begin
+        if (TM_A_PRE)      \A.P.comb = 2207;
+        else if (TM_A_DIR) \A.P.comb = 1514;
+        else              \A.P.comb =  841;   // A:B -> X mux -> ALU
+    end
+    endfunction
+    function integer \A.PCOUT.comb ;
+    begin
+        if (TM_A_PRE)      \A.PCOUT.comb = 2220;
+        else if (TM_A_DIR) \A.PCOUT.comb = 1527;
+        else              \A.PCOUT.comb =  854;
+    end
+    endfunction
+    function integer \B.P.comb ;
+    begin
+        if (TM_B_PRE)      \B.P.comb = 2162;
+        else if (TM_B_DIR) \B.P.comb = 1559;
+        else              \B.P.comb =  815;
+    end
+    endfunction
+    function integer \B.PCOUT.comb ;
+    begin
+        if (TM_B_PRE)      \B.PCOUT.comb = 2175;
+        else if (TM_B_DIR) \B.PCOUT.comb = 1572;
+        else              \B.PCOUT.comb =  828;
+    end
+    endfunction
+    function integer \C.P.comb ;
+    begin
+        \C.P.comb = 799;      // same through the W, Y or Z mux, any USE_MULT
+    end
+    endfunction
+    function integer \C.PCOUT.comb ;
+    begin
+        \C.PCOUT.comb = 812;
+    end
+    endfunction
+    function integer \D.P.comb ;
+    begin
+        \D.P.comb = TM_PREADD ? 2167 : 0;
+    end
+    endfunction
+    function integer \D.PCOUT.comb ;
+    begin
+        \D.PCOUT.comb = TM_PREADD ? 2180 : 0;
+    end
+    endfunction
+`ifndef VERIFIC
+    generate
+        // A is combinational to P unless a register sits on every A->P path
+        if (AREG == 0 && PREG == 0 && (!TM_A_MUL || (MREG == 0 && !(TM_A_PRE && ADREG != 0))))
+            specify
+                (A *> P) =      \A.P.comb ();
+                (A *> PCOUT) =  \A.PCOUT.comb ();
+            endspecify
+        else
+            specify
+                $setup(A, posedge CLK &&& !IS_CLK_INVERTED, \A.required () );
+                $setup(A, negedge CLK &&&  IS_CLK_INVERTED, \A.required () );
+            endspecify
+
+        if (BREG == 0 && PREG == 0 && (!TM_B_MUL || (MREG == 0 && !(TM_B_PRE && ADREG != 0))))
+            specify
+                (B *> P) =      \B.P.comb ();
+                (B *> PCOUT) =  \B.PCOUT.comb ();
+            endspecify
+        else
+            specify
+                $setup(B, posedge CLK &&& !IS_CLK_INVERTED, \B.required () );
+                $setup(B, negedge CLK &&&  IS_CLK_INVERTED, \B.required () );
+            endspecify
+
+        if (CREG == 0 && PREG == 0)
+            specify
+                (C *> P) =      \C.P.comb ();
+                (C *> PCOUT) =  \C.PCOUT.comb ();
+            endspecify
+        else
+            specify
+                $setup(C, posedge CLK &&& !IS_CLK_INVERTED, \C.required () );
+                $setup(C, negedge CLK &&&  IS_CLK_INVERTED, \C.required () );
+            endspecify
+
+        if (TM_PREADD && DREG == 0 && ADREG == 0 && MREG == 0 && PREG == 0)
+            specify
+                (D *> P) =      \D.P.comb ();
+                (D *> PCOUT) =  \D.PCOUT.comb ();
+            endspecify
+        else if (TM_PREADD)
+            specify
+                $setup(D, posedge CLK &&& !IS_CLK_INVERTED, \D.required () );
+                $setup(D, negedge CLK &&&  IS_CLK_INVERTED, \D.required () );
+            endspecify
+
+        if (PREG == 0)
+            specify
+                (PCIN *> P) =       655;
+                (PCIN *> PCOUT) =   668;
+            endspecify
+        else
+            specify
+                $setup(PCIN, posedge CLK &&& !IS_CLK_INVERTED, \PCIN.required () );
+                $setup(PCIN, negedge CLK &&&  IS_CLK_INVERTED, \PCIN.required () );
+            endspecify
+
+        if (CARRYINREG == 0 && PREG == 0)
+            specify
+                (CARRYIN *> P) =     626;
+                (CARRYIN *> PCOUT) = 639;
+            endspecify
+        else
+            specify
+                $setup(CARRYIN, posedge CLK &&& !IS_CLK_INVERTED, \CARRYIN.required () );
+                $setup(CARRYIN, negedge CLK &&&  IS_CLK_INVERTED, \CARRYIN.required () );
+            endspecify
+
+        // A/B cascade outputs (ACOUT/BCOUT come from the A/B register selected by
+        // ACASCREG/BCASCREG, or straight from A/B when AREG/BREG == 0)
+        if (AREG == 0)
+            specify
+                (A *> ACOUT) = 363;
+            endspecify
+        else
+            specify
+                if (!IS_CLK_INVERTED) (posedge CLK => (ACOUT : 30'bx)) = 386;
+                if ( IS_CLK_INVERTED) (negedge CLK => (ACOUT : 30'bx)) = 386;
+            endspecify
+        if (BREG == 0)
+            specify
+                (B *> BCOUT) = 338;
+            endspecify
+        else
+            specify
+                if (!IS_CLK_INVERTED) (posedge CLK => (BCOUT : 18'bx)) = 414;
+                if ( IS_CLK_INVERTED) (negedge CLK => (BCOUT : 18'bx)) = 414;
+            endspecify
+
+        if (PREG || AREG || ADREG || BREG || CREG || DREG || MREG || CARRYINREG)
+            specify
+                if (!IS_CLK_INVERTED && CEP) (posedge CLK => (P : 48'bx)) = \P.arrival () ;
+                if ( IS_CLK_INVERTED && CEP) (negedge CLK => (P : 48'bx)) = \P.arrival () ;
+                if (!IS_CLK_INVERTED && CEP) (posedge CLK => (PCOUT : 48'bx)) = \PCOUT.arrival () ;
+                if ( IS_CLK_INVERTED && CEP) (negedge CLK => (PCOUT : 48'bx)) = \PCOUT.arrival () ;
+            endspecify
+    endgenerate
+`endif
+`endif
+endmodule
+
+
 // TODO: DSP48E2 (Ultrascale).
 
 // Block RAM

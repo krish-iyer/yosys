@@ -38,7 +38,7 @@ udata <Cell*> dff
 // (1) Starting from a DSP48* cell that (a) doesn't have a CREG already,
 //     and (b) uses the 'C' port
 match dsp
-	select dsp->type.in(\DSP48A, \DSP48A1, \DSP48E1)
+	select dsp->type.in(\DSP48A, \DSP48A1, \DSP48E1, \DSP48E2)
 	select param(dsp, \CREG).as_int() == 0
 	select nusers(port(dsp, \C, SigSpec())) > 1
 endmatch
@@ -57,7 +57,7 @@ code sigC sigP clock
 	sigC = unextend(port(dsp, \C, SigSpec()));
 
 	SigSpec P = port(dsp, \P);
-	if (!dsp->type.in(\DSP48E1) ||
+	if (!dsp->type.in(\DSP48E1, \DSP48E2) ||
             param(dsp, \USE_MULT).decode_string() == "MULTIPLY") {
 		// Only care about those bits that are used
 		int i;
@@ -121,7 +121,7 @@ code
 endcode
 
 match ff
-	select ff->type.in($dff, $dffe, $sdff, $sdffe)
+	select ff->type.in($dff, $dffe, $sdff, $sdffe, $sdffce)
 	// DSP48E1 does not support clock inversion
 	select param(ff, \CLK_POLARITY).as_bool()
 

@@ -1,0 +1,94 @@
+# DSP48E2 (UltraScale/UltraScale+) packing by xilinx_dsp: registers, pre-adder,
+# post-adder (add/sub/accumulate), shifted products and A/B cascades.
+
+read_verilog <<EOT
+module mul_pipe(input clk, input signed [26:0] a, input signed [17:0] b, output reg signed [44:0] p);
+  reg signed [26:0] ar; reg signed [17:0] br; reg signed [44:0] m;
+  always @(posedge clk) begin ar <= a; br <= b; m <= ar * br; p <= m; end
+endmodule
+
+module preadd(input clk, input signed [25:0] a, d, input signed [17:0] b, output reg signed [44:0] p);
+  reg signed [25:0] ar, dr; reg signed [17:0] br, br2; reg signed [26:0] ad; reg signed [44:0] m;
+  always @(posedge clk) begin ar <= a; dr <= d; br <= b; br2 <= br; ad <= ar + dr; m <= ad * br2; p <= m; end
+endmodule
+
+module mac(input clk, rst, input signed [17:0] a, b, output reg signed [47:0] acc);
+  reg signed [17:0] ar, br; reg signed [35:0] m;
+  always @(posedge clk) begin ar <= a; br <= b; m <= ar * br; if (rst) acc <= 0; else acc <= acc + m; end
+endmodule
+
+module sub_mc(input clk, input signed [26:0] a, input signed [17:0] b, input signed [47:0] c, output reg signed [47:0] p);
+  reg signed [26:0] ar; reg signed [17:0] br; reg signed [47:0] cr; reg signed [44:0] m;
+  always @(posedge clk) begin ar <= a; br <= b; cr <= c; m <= ar * br; p <= m - cr; end
+endmodule
+
+module sub_cm(input clk, input signed [26:0] a, input signed [17:0] b, input signed [47:0] c, output reg signed [47:0] p);
+  reg signed [26:0] ar; reg signed [17:0] br; reg signed [47:0] cr; reg signed [44:0] m;
+  always @(posedge clk) begin ar <= a; br <= b; cr <= c; m <= ar * br; p <= cr - m; end
+endmodule
+
+// constant coefficient with trailing zeros (opt_expr moves them out of the $mul)
+module shifted(input clk, input signed [15:0] x, input signed [39:0] c, output reg signed [39:0] p);
+  reg signed [15:0] xr; reg signed [39:0] cr; reg signed [33:0] m;
+  always @(posedge clk) begin xr <= x; cr <= c; m <= xr * 18'sd3456; p <= m + cr; end
+endmodule
+
+// systolic FIR: products accumulated along the chain, data delay line in the DSPs
+module fir4(input clk, input signed [15:0] x, output signed [47:0] y);
+  reg signed [15:0] xr [0:7]; reg signed [33:0] m [0:3]; reg signed [47:0] acc [0:3];
+  integer i;
+  always @(posedge clk) begin
+    xr[0] <= x; for (i = 1; i < 8; i = i + 1) xr[i] <= xr[i-1];
+    m[0] <= xr[0] * 18'sd1234; m[1] <= xr[2] * -18'sd2345; m[2] <= xr[4] * 18'sd3456; m[3] <= xr[6] * -18'sd4567;
+    acc[0] <= m[0]; for (i = 1; i < 4; i = i + 1) acc[i] <= acc[i-1] + m[i];
+  end
+  assign y = acc[3];
+endmodule
+EOT
+design -save read
+
+design -load read
+synth_xilinx -family xcup -top mul_pipe -noiopad -noclkbuf
+cd mul_pipe
+select -assert-count 1 t:DSP48E2
+select -assert-count 1 t:DSP48E2 r:AREG=1 %i r:BREG=1 %i r:MREG=1'1 %i r:PREG=1'1 %i
+select -assert-none t:DSP48E2 %% t:* %D
+
+design -load read
+synth_xilinx -family xcup -top preadd -noiopad -noclkbuf
+cd preadd
+select -assert-count 1 t:DSP48E2
+select -assert-count 1 t:DSP48E2 r:AMULTSEL=AD %i r:ADREG=1 %i r:DREG=1 %i r:BREG=2 %i
+select -assert-none t:DSP48E2 %% t:* %D
+
+design -load read
+synth_xilinx -family xcup -top mac -noiopad -noclkbuf
+cd mac
+select -assert-count 1 t:DSP48E2
+select -assert-count 1 t:DSP48E2 r:PREG=1'1 %i
+select -assert-none t:DSP48E2 %% t:* %D
+
+design -load read
+synth_xilinx -family xcup -top sub_mc -noiopad -noclkbuf
+cd sub_mc
+select -assert-count 1 t:DSP48E2
+select -assert-none t:DSP48E2 %% t:* %D
+
+design -load read
+synth_xilinx -family xcup -top sub_cm -noiopad -noclkbuf
+cd sub_cm
+select -assert-count 1 t:DSP48E2
+select -assert-none t:DSP48E2 %% t:* %D
+
+design -load read
+synth_xilinx -family xcup -top shifted -noiopad -noclkbuf
+cd shifted
+select -assert-count 1 t:DSP48E2
+select -assert-none t:DSP48E2 %% t:* %D
+
+design -load read
+synth_xilinx -family xcup -top fir4 -noiopad -noclkbuf
+cd fir4
+select -assert-count 4 t:DSP48E2
+select -assert-count 3 t:DSP48E2 r:A_INPUT=CASCADE %i
+select -assert-none t:DSP48E2 %% t:* %D
