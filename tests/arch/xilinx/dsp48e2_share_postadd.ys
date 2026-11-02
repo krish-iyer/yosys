@@ -1,0 +1,97 @@
+# Accumulators with a load (DSP48E2): the dynamic Z-mux select must follow
+# the mux input that carries the accumulator, and loads written as two sums
+# sharing the product are rewritten as (S ? X1 : X2) + M so that they pack.
+# Equivalence is checked against the DSP48E2 simulation model.
+
+read_verilog <<EOT
+// (1) load mux with the accumulator on its second input: Z = P while ld is
+//     high, Z = C while ld is low
+module load_inv(input clk, ld, input signed [5:0] a, b, input signed [13:0] c, output reg signed [15:0] acc);
+  reg signed [11:0] m;
+  always @(posedge clk) begin m <= a * b; acc <= (ld ? acc : c) + m; end
+endmodule
+
+// (2) load written as two sums, accumulator on the second mux input
+module share_add_inv(input clk, ld, input signed [5:0] a, b, input signed [13:0] c, output reg signed [15:0] acc);
+  reg signed [11:0] m;
+  always @(posedge clk) begin m <= a * b; acc <= ld ? (acc + m) : (c + m); end
+endmodule
+
+// (3) shared minuend
+module share_rsub(input clk, ld, input signed [5:0] a, b, input signed [13:0] c, output reg signed [15:0] acc);
+  reg signed [11:0] m;
+  always @(posedge clk) begin m <= a * b; acc <= ld ? (m - c) : (m - acc); end
+endmodule
+
+// (4) load the product alone (0 + m)
+module share_load_m(input clk, ld, input signed [5:0] a, b, output reg signed [15:0] acc);
+  reg signed [11:0] m;
+  always @(posedge clk) begin m <= a * b; acc <= ld ? m : (acc + m); end
+endmodule
+
+// (5) the load branch wraps at 12 bits before it is sign-extended, so it must
+//     not be merged with the accumulate branch
+module share_narrow(input clk, ld, input signed [5:0] a, b, input signed [13:0] c, output reg signed [15:0] acc);
+  reg signed [11:0] m;
+  wire signed [11:0] t = c + m;
+  always @(posedge clk) begin m <= a * b; acc <= ld ? t : (acc + m); end
+endmodule
+EOT
+design -save read
+
+design -load read
+hierarchy -top load_inv
+proc
+equiv_opt -run :prove -map +/xilinx/cells_sim.v synth_xilinx -family xcup -noiopad
+miter -equiv -flatten -make_assert -make_outputs gold gate miter
+sat -verify -prove-asserts -set-init-zero -seq 4 miter
+design -load postopt
+cd load_inv
+select -assert-count 1 t:DSP48E2
+select -assert-count 1 t:DSP48E2 r:IS_OPMODE_INVERTED=9'b000010000 %i
+select -assert-none t:LUT* t:CARRY8 t:FD* t:INV
+
+design -load read
+hierarchy -top share_add_inv
+proc
+equiv_opt -run :prove -map +/xilinx/cells_sim.v synth_xilinx -family xcup -noiopad
+miter -equiv -flatten -make_assert -make_outputs gold gate miter
+sat -verify -prove-asserts -set-init-zero -seq 4 miter
+design -load postopt
+cd share_add_inv
+select -assert-count 1 t:DSP48E2
+select -assert-count 1 t:DSP48E2 r:IS_OPMODE_INVERTED=9'b000010000 %i
+select -assert-none t:LUT* t:CARRY8 t:FD* t:INV
+
+design -load read
+hierarchy -top share_rsub
+proc
+equiv_opt -run :prove -map +/xilinx/cells_sim.v synth_xilinx -family xcup -noiopad
+miter -equiv -flatten -make_assert -make_outputs gold gate miter
+sat -verify -prove-asserts -set-init-zero -seq 4 miter
+design -load postopt
+cd share_rsub
+select -assert-count 1 t:DSP48E2
+select -assert-none t:LUT* t:CARRY8 t:FD* t:INV
+
+design -load read
+hierarchy -top share_load_m
+proc
+equiv_opt -run :prove -map +/xilinx/cells_sim.v synth_xilinx -family xcup -noiopad
+miter -equiv -flatten -make_assert -make_outputs gold gate miter
+sat -verify -prove-asserts -set-init-zero -seq 4 miter
+design -load postopt
+cd share_load_m
+select -assert-count 1 t:DSP48E2
+select -assert-none t:LUT* t:CARRY8 t:FD* t:INV
+
+design -load read
+hierarchy -top share_narrow
+proc
+equiv_opt -run :prove -map +/xilinx/cells_sim.v synth_xilinx -family xcup -noiopad
+miter -equiv -flatten -make_assert -make_outputs gold gate miter
+sat -verify -prove-asserts -set-init-zero -seq 4 miter
+design -load postopt
+cd share_narrow
+select -assert-count 1 t:DSP48E2
+select -assert-min 1 t:CARRY*

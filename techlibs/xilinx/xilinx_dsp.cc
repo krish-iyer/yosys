@@ -568,7 +568,21 @@ void xilinx_dsp_pack(xilinx_dsp_pm &pm)
 		SigSpec &opmode = cell->connections_.at(ID(OPMODE));
 		if (st.postAddMux) {
 			log_assert(st.ffP);
-			opmode[4] = st.postAddMux->getPort(ID::S);
+			// Z = P (OPMODE[6:4] = 010) while the mux passes the accumulator,
+			// C (011) while it passes its other input
+			SigSpec S = st.postAddMux->getPort(ID::S);
+			if (st.postAddMuxAB == ID::A)
+				opmode[4] = S;
+			else if (cell->type == ID(DSP48E2)) {
+				// invert the pin rather than S (the DSP48E1 model does not
+				// support IS_OPMODE_INVERTED)
+				opmode[4] = S;
+				Const inv = cell->hasParam(ID(IS_OPMODE_INVERTED)) ? cell->getParam(ID(IS_OPMODE_INVERTED)) : Const(State::S0, 9);
+				inv.resize(9, State::S0);
+				inv.set(4, State::S1);
+				cell->setParam(ID(IS_OPMODE_INVERTED), inv);
+			} else
+				opmode[4] = pm.module->Not(NEW_ID, S);
 			pm.autoremove(st.postAddMux);
 		}
 		else if (st.ffP && st.sigC == st.sigP)
@@ -1156,6 +1170,226 @@ static void xilinx_dsp_break_cycles(Module *module, const std::vector<Cell*> &se
 // fits into B, swap the two operands (e.g. symmetric FIR filters, where the
 // pre-added data is narrower than the coefficient). Both operands are sign
 // extended, so swapping them does not change the product.
+// An accumulator with a load written as two sums, y = S ? (X1 + M) : (X2 + M),
+// gives the product M two users, so it never reaches the DSP post-adder. When M
+// is a DSP product (directly, or through one register: the future MREG), rewrite
+// it as y = (S ? X1 : X2) + M. The pattern matcher then packs the adder as the
+// post-adder and the $mux as the dynamic Z-mux select between P and C (or as a
+// mux in front of C). A branch that is M alone counts as 0 + M. $sub is handled
+// when both branches subtract M (X - M) or both subtract from M (M - X); then
+// only M - X allows a branch of M alone (M - 0).
+// The rewrite is exact: a branch reaches the mux either at no more than its
+// adder's width (both forms then agree modulo 2^width), or sign/zero-extended
+// from an adder wide enough to hold every possible result.
+static void xilinx_dsp_share_postadd(Module *module, const std::vector<Cell*> &selected_cells)
+{
+	SigMap sigmap(module);
+	pool<Cell*> selected(selected_cells.begin(), selected_cells.end());
+	pool<SigBit> product;              // bits driven by a DSP P output
+	dict<SigBit, SigBit> ff_d;         // register Q bit -> its D bit
+	dict<SigBit, Cell*> adder;         // selected $add/$sub Y bit -> cell
+	dict<SigBit, pool<Cell*>> users;   // including the driver; nullptr for ports
+	std::vector<Cell*> muxes;
+	for (auto cell : module->cells()) {
+		for (auto &conn : cell->connections())
+			for (auto bit : sigmap(conn.second))
+				if (bit.wire)
+					users[bit].insert(cell);
+		if (cell->type.in(ID(DSP48E1), ID(DSP48E2))) {
+			if (cell->hasPort(ID::P))
+				for (auto bit : sigmap(cell->getPort(ID::P)))
+					if (bit.wire)
+						product.insert(bit);
+		} else if (cell->type.in(ID($dff), ID($dffe), ID($sdff), ID($sdffe), ID($sdffce))) {
+			SigSpec Q = sigmap(cell->getPort(ID::Q)), D = sigmap(cell->getPort(ID::D));
+			for (int i = 0; i < GetSize(Q); i++)
+				if (Q[i].wire)
+					ff_d[Q[i]] = D[i];
+		} else if (selected.count(cell)) {
+			if (cell->type.in(ID($add), ID($sub))) {
+				for (auto bit : sigmap(cell->getPort(ID::Y)))
+					if (bit.wire)
+						adder[bit] = cell;
+			} else if (cell->type == ID($mux))
+				muxes.push_back(cell);
+		}
+	}
+	for (auto wire : module->wires())
+		if (wire->port_id > 0)
+			for (auto bit : sigmap(wire))
+				users[bit].insert(nullptr);
+
+	// All non-constant bits of 'sig' (at least one) are (registered) DSP products
+	auto is_product = [&](const SigSpec &sig) {
+		bool any = false;
+		for (auto bit : sig) {
+			if (!bit.wire)
+				continue;
+			auto it = ff_d.find(bit);
+			if (!product.count(bit) && (it == ff_d.end() || !product.count(it->second)))
+				return false;
+			any = true;
+		}
+		return any;
+	};
+	// How the mux input 'in' extends 'base': -1 if it does not; 0 if it uses
+	// at most GetSize(base) bits of it; otherwise a mask of the extensions it
+	// matches (1: sign, 2: zero)
+	auto extension = [](const SigSpec &in, const SigSpec &base) {
+		int n = std::min(GetSize(in), GetSize(base));
+		if (n == 0 || in.extract(0, n) != base.extract(0, n))
+			return -1;
+		if (GetSize(in) <= GetSize(base))
+			return 0;
+		SigSpec rest = in.extract_end(n);
+		int mask = 0;
+		if (rest == SigSpec(base[n-1], GetSize(rest)))
+			mask |= 1;
+		if (rest.is_fully_zero())
+			mask |= 2;
+		return mask ? mask : -1;
+	};
+
+	struct Branch {
+		Cell *cell = nullptr;   // the adder; nullptr for a branch of M alone
+		SigSpec ops[2];         // its operands
+		int width = 0;          // width of the value the mux input extends
+		int ext = 0;            // as returned by extension()
+	};
+
+	for (auto mux : muxes) {
+		SigSpec S = sigmap(mux->getPort(ID::S));
+		SigSpec in[2] = {sigmap(mux->getPort(ID::A)), sigmap(mux->getPort(ID::B))};
+		int Wm = GetSize(in[0]);
+		if (Wm == 0 || Wm > 48)
+			continue;
+
+		Branch b[2];
+		bool ok = true;
+		for (int k = 0; k < 2 && ok; k++) {
+			auto it = adder.find(in[k][0]);
+			if (it == adder.end())
+				continue;
+			Cell *cell = it->second;
+			SigSpec Y = sigmap(cell->getPort(ID::Y));
+			b[k].ext = extension(in[k], Y);
+			b[k].width = GetSize(Y);
+			ok = b[k].ext >= 0 && cell->getParam(ID::A_SIGNED).as_bool() == cell->getParam(ID::B_SIGNED).as_bool();
+			// the adder must feed this mux input only
+			for (auto bit : Y) {
+				if (!ok || !bit.wire)
+					continue;
+				if (bit == S[0])
+					ok = false;
+				for (auto user : users.at(bit))
+					if (user != cell && user != mux)
+						ok = false;
+			}
+			b[k].cell = cell;
+			b[k].ops[0] = sigmap(cell->getPort(ID::A));
+			b[k].ops[1] = sigmap(cell->getPort(ID::B));
+		}
+		if (!ok || (!b[0].cell && !b[1].cell) || b[0].cell == b[1].cell)
+			continue;
+
+		// Find the shared operand M (position mpos in the adders) and the
+		// other operands X[k] (empty for a branch of M alone)
+		Cell *ref = b[0].cell ? b[0].cell : b[1].cell;
+		IdString type = ref->type;
+		bool sgn = ref->getParam(ID::A_SIGNED).as_bool();
+		SigSpec M, X[2];
+		int mpos = -1;
+		if (b[0].cell && b[1].cell) {
+			if (b[1].cell->type != type || b[1].cell->getParam(ID::A_SIGNED).as_bool() != sgn)
+				continue;
+			for (int i = 0; i < 2 && mpos < 0; i++)
+				for (int j = 0; j < 2 && mpos < 0; j++) {
+					if ((type == ID($sub) && i != j) || b[0].ops[i] != b[1].ops[j] || !is_product(b[0].ops[i]))
+						continue;
+					M = b[0].ops[i];
+					X[0] = b[0].ops[1-i];
+					X[1] = b[1].ops[1-j];
+					mpos = i;
+				}
+		} else {
+			int k = b[0].cell ? 0 : 1;
+			for (int i = 0; i < 2 && mpos < 0; i++) {
+				if ((type == ID($sub) && i != 0) || !is_product(b[k].ops[i]))
+					continue;
+				int ext = extension(in[1-k], b[k].ops[i]);
+				if (ext < 0)
+					continue;
+				M = b[k].ops[i];
+				X[k] = b[k].ops[1-i];
+				b[1-k].width = GetSize(M);
+				b[1-k].ext = ext;
+				mpos = i;
+			}
+		}
+		if (mpos < 0 || GetSize(M) > 60 || GetSize(X[0]) > 60 || GetSize(X[1]) > 60)
+			continue;
+
+		// Exactness: a branch extended beyond the width of its value must
+		// hold every result of X op M in that width
+		auto range = [sgn](const SigSpec &sig, int64_t &lo, int64_t &hi) {
+			int w = GetSize(sig);
+			if (w == 0)
+				lo = hi = 0;
+			else if (sgn)
+				lo = -(int64_t(1) << (w-1)), hi = (int64_t(1) << (w-1)) - 1;
+			else
+				lo = 0, hi = (int64_t(1) << w) - 1;
+		};
+		for (int k = 0; k < 2 && ok; k++) {
+			if (b[k].ext == 0)
+				continue;
+			int64_t xlo, xhi, mlo, mhi, lo, hi;
+			range(X[k], xlo, xhi);
+			range(M, mlo, mhi);
+			if (type == ID($add))
+				lo = xlo + mlo, hi = xhi + mhi;
+			else if (mpos == 1)
+				lo = xlo - mhi, hi = xhi - mlo;
+			else
+				lo = mlo - xhi, hi = mhi - xlo;
+			int64_t W = b[k].width;
+			ok = ((b[k].ext & 1) && lo >= -(int64_t(1) << (W-1)) && hi < (int64_t(1) << (W-1))) ||
+					((b[k].ext & 2) && lo >= 0 && hi < (int64_t(1) << W));
+		}
+		if (!ok)
+			continue;
+
+		SigSpec N = module->addWire(NEW_ID, Wm);
+		SigSpec Y = mux->getPort(ID::Y);
+		for (int k = 0; k < 2; k++) {
+			SigSpec x = X[k];
+			if (GetSize(x) == 0)
+				x = SigSpec(State::S0, Wm);
+			x.extend_u0(Wm, sgn);
+			mux->setPort(k ? ID::B : ID::A, x);
+		}
+		mux->setPort(ID::Y, N);
+		std::string src = ref->get_src_attribute();
+		Cell *cell;
+		if (type == ID($add))
+			cell = module->addAdd(NEW_ID, N, M, Y, sgn, src);
+		else if (mpos == 1)
+			cell = module->addSub(NEW_ID, N, M, Y, sgn, src);
+		else
+			cell = module->addSub(NEW_ID, M, N, Y, sgn, src);
+		if (!module->design->selected_whole_module(module))
+			module->design->select(module, cell);
+		log("Moved %s in front of a single %s %s: both of its inputs used the product %s.\n",
+				mux, cell->type.unescape(), cell, log_signal(M));
+		for (int k = 0; k < 2; k++)
+			if (b[k].cell) {
+				for (auto bit : sigmap(b[k].cell->getPort(ID::Y)))
+					adder.erase(bit);
+				module->remove(b[k].cell);
+			}
+	}
+}
+
 static void xilinx_dsp_swap_operands(Module *module, const std::vector<Cell*> &selected_cells)
 {
 	SigMap sigmap(module);
@@ -1651,6 +1885,10 @@ struct XilinxDspPass : public Pass {
 			// Let the pre-adder see adder outputs that mul2dsp put on B
 			if (family == "xcu")
 				xilinx_dsp_swap_operands(module, module->selected_cells());
+
+			// S ? (X1 + M) : (X2 + M)  ->  (S ? X1 : X2) + M  for DSP products M
+			if (family == "xcu")
+				xilinx_dsp_share_postadd(module, module->selected_cells());
 
 			// Match for all features ([ABDMP][12]?REG, pre-adder,
 			// post-adder, pattern detector, etc.) except for CREG
