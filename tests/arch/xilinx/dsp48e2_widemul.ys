@@ -1,0 +1,66 @@
+# Wide multipliers on UltraScale+: xilinx_widemul splits them into 17-bit
+# chunk products summed in column-wise PCOUT->PCIN cascade chains, and moves
+# the product register onto the chain outputs (the P registers of the chain
+# ends, plus fabric flip-flops for 17-bit slices of mid-chain DSPs).
+
+read_verilog <<EOT
+module mul48(input clk, input signed [47:0] a, b, output reg signed [95:0] p);
+  reg signed [47:0] ar, br;
+  always @(posedge clk) begin ar <= a; br <= b; p <= ar * br; end
+endmodule
+
+module mul30x20(input clk, input signed [29:0] a, input signed [19:0] b, output reg signed [49:0] p);
+  reg signed [29:0] ar; reg signed [19:0] br;
+  always @(posedge clk) begin ar <= a; br <= b; p <= ar * br; end
+endmodule
+
+module mul48_init(input clk, input signed [47:0] a, b, output reg signed [95:0] p = 96'sd1);
+  reg signed [47:0] ar, br;
+  always @(posedge clk) begin ar <= a; br <= b; p <= ar * br; end
+endmodule
+EOT
+design -save read
+
+# 3 x 3 chunks: three chains of three DSPs, the chain ends with P registers,
+# two 17-bit slices registered in fabric
+design -load read
+synth_xilinx -family xcup -top mul48 -noiopad -noclkbuf
+cd mul48
+select -assert-count 9 t:DSP48E2
+select -assert-count 3 t:DSP48E2 r:PREG=1'1 %i
+select -assert-count 34 t:FDRE
+
+# one operand fits the 27-bit multiplier port: a single chain of two DSPs
+design -load read
+synth_xilinx -family xcup -top mul30x20 -noiopad -noclkbuf
+cd mul30x20
+select -assert-count 2 t:DSP48E2
+select -assert-count 1 t:DSP48E2 r:PREG=1'1 %i
+select -assert-count 17 t:FDRE
+select -assert-none t:LUT* t:CARRY*
+
+# a register with a non-zero init value stays on the product
+design -load read
+synth_xilinx -family xcup -top mul48_init -noiopad -noclkbuf
+cd mul48_init
+select -assert-count 9 t:DSP48E2
+select -assert-none t:DSP48E2 r:PREG=1'1 %i
+select -assert-count 96 t:FD*
+
+# the pass itself: nine chunk products, the product register moved (or not)
+design -load read
+hierarchy -top mul48
+proc
+opt_clean
+xilinx_widemul
+select -assert-count 9 t:$mul
+select -assert-none t:$dff r:WIDTH=96 %i
+select -assert-count 2 t:$dff r:WIDTH=17 %i
+
+design -load read
+hierarchy -top mul48
+proc
+opt_clean
+xilinx_widemul -noretime
+select -assert-count 9 t:$mul
+select -assert-count 1 t:$dff r:WIDTH=96 %i

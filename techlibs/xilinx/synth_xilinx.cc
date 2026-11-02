@@ -396,6 +396,12 @@ struct SynthXilinxPass : public ScriptPass
 				run("alumacc -macc-only");
 				run("maccmap -unmap");
 				run("opt_clean");
+				// split multipliers that need DSPs along both operands into
+				// column-wise cascade chains
+				if (help_mode)
+					run("xilinx_widemul", "(for -family xcu/xcup)");
+				else if (family == "xcu" || family == "xcup")
+					run("xilinx_widemul");
 				// NB: Xilinx multipliers are signed only
 				if (help_mode)
 					run("techmap -map +/mul2dsp.v -map +/xilinx/{family}_dsp_map.v {options}");
