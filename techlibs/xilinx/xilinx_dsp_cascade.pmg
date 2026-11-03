@@ -21,10 +21,11 @@
 //   (4) Same as (3) but for BCOUT -> BCIN cascade
 //   (5) Recursively go to (2.1) until no more matches possible, keeping track
 //       of the longest possible chain found
-//   (6) The longest chain is then divided into chunks of no more than
-//       MAX_DSP_CASCADE in length (to prevent long cascades that exceed the
-//       height of a DSP column) with each DSP in each chunk being rewritten
-//       to use [ABP]COUT -> [ABP]CIN cascading as appropriate
+//   (6) The longest chain is then divided into the fewest chunks of no more
+//       than 'max_cascade' cells (set by the pass, to prevent cascades that
+//       exceed the height of a DSP column), of nearly equal length, with each
+//       DSP in each chunk being rewritten to use [ABP]COUT -> [ABP]CIN
+//       cascading as appropriate
 // Notes:
 //   - Currently, [AB]COUT -> [AB]COUT cascades (3 or 4) are only considered
 //     if a PCOUT -> PCIN cascade is (2.1 or 2.2) first identified; this need
@@ -55,10 +56,7 @@ state <int> ffoffset
 udata <SigSpec> dffD dffQ
 udata <SigBit> dffclock
 udata <Cell*> dff
-
-code
-#define MAX_DSP_CASCADE 20
-endcode
+udata <int> max_cascade
 
 // (1) Starting from a DSP48* cell that (a) has the Z multiplexer
 //     (controlled by OPMODE[3:2] for DSP48A*, by OPMODE[6:4] for DSP48E1)
@@ -68,10 +66,11 @@ match first
 	select nusers(port(first, \PCOUT, SigSpec())) <= 1
 endmatch
 
-// (6) The longest chain is then divided into chunks of no more than
-//     MAX_DSP_CASCADE in length (to prevent long cascades that exceed the
-//     height of a DSP column) with each DSP in each chunk being rewritten
-//     to use [ABP]COUT -> [ABP]CIN cascading as appropriate
+// (6) The longest chain is then divided into the fewest chunks of no more
+//     than 'max_cascade' cells, of nearly equal length (which puts the cuts
+//     earlier than filling chunks of 'max_cascade' from the start, keeping
+//     any fabric delay lines they need shorter), with each DSP in each chunk
+//     being rewritten to use [ABP]COUT -> [ABP]CIN cascading as appropriate
 code
 	longest_chain.clear();
 	chain.emplace_back(first, -1, -1, -1);
@@ -80,6 +79,9 @@ finally
 	chain.pop_back();
 	log_assert(chain.empty());
 	if (GetSize(longest_chain) > 1) {
+		log_assert(max_cascade > 0);
+		int len = GetSize(longest_chain);
+		int nchunks = (len + max_cascade - 1) / max_cascade;
 		Cell *dsp = std::get<0>(longest_chain.front());
 
 		Cell *dsp_pcin;
@@ -87,7 +89,8 @@ finally
 		for (int i = 1; i < GetSize(longest_chain); i++) {
 			std::tie(dsp_pcin,P,AREG,BREG) = longest_chain[i];
 
-			if (i % MAX_DSP_CASCADE > 0) {
+			// cell i starts a new chunk when floor(i * nchunks / len) changes
+			if (i * nchunks / len == (i - 1) * nchunks / len) {
 				if (P >= 0) {
 					Wire *cascade = module->addWire(NEW_ID, 48);
 					dsp_pcin->setPort(\C, Const(0, 48));
@@ -165,7 +168,7 @@ finally
 				}
 			}
 			else {
-				log_debug("  Blocking %s -> %s cascade (exceeds max: %d)\n", dsp, dsp_pcin, MAX_DSP_CASCADE);
+				log_debug("  Blocking %s -> %s cascade (chain of %d split into %d, max: %d)\n", dsp, dsp_pcin, len, nchunks, max_cascade);
 			}
 
 			dsp = dsp_pcin;

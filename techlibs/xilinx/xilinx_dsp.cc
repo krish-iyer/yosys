@@ -1580,10 +1580,10 @@ static void xilinx_dsp_shift_heads(Module *module, const std::vector<Cell*> &sel
 // enable and reset, zero init), then 'next' can take 'prev's ACOUT (BCOUT)
 // instead, with ACASCREG (BCASCREG) set accordingly, making those fabric
 // registers redundant. Every DSP keeps at most one cascade neighbour in each
-// direction (shared by its [ABP]CIN/[ABP]COUT), as required for placement.
-static void xilinx_dsp_abcascade(Module *module, const std::vector<Cell*> &selected_cells)
+// direction (shared by its [ABP]CIN/[ABP]COUT), as required for placement, and
+// no chain grows beyond max_cascade cells.
+static void xilinx_dsp_abcascade(Module *module, const std::vector<Cell*> &selected_cells, int max_cascade)
 {
-	const int MAX_CASCADE = 20;
 	SigMap sigmap(module);
 
 	dict<SigBit, std::pair<Cell*, int>> ffq;
@@ -1727,7 +1727,7 @@ static void xilinx_dsp_abcascade(Module *module, const std::vector<Cell*> &selec
 			SigSpec r;
 			if (pstr(c, k.input, "DIRECT") == "DIRECT")
 				r = sigmap(c->getPort(k.port));
-			else if (depth < MAX_CASCADE && pred.count(c) && used(c, k.cin)) {
+			else if (depth < max_cascade && pred.count(c) && used(c, k.cin)) {
 				Cell *p = pred.at(c);
 				r = logical_input(p, depth + 1);
 				for (int i = 0; i < pint(p, k.cascreg, 1) && !r.empty(); i++)
@@ -1774,13 +1774,14 @@ static void xilinx_dsp_abcascade(Module *module, const std::vector<Cell*> &selec
 					ok = reg >= 1 && ff_matches(ff1, prev, reg == 2 ? k.ce1 : k.ce2, k.rst, k.rst_inv);
 				if (!ok)
 					continue;
-				// keep chains acyclic and no longer than MAX_CASCADE in total
+				// keep chains acyclic and no longer than max_cascade in total
 				int len = 2;
+				ok = len <= max_cascade;
 				for (Cell *c = prev; ok && pred.count(c); c = pred.at(c))
-					if (++len > MAX_CASCADE || pred.at(c) == next)
+					if (++len > max_cascade || pred.at(c) == next)
 						ok = false;
 				for (Cell *c = next; ok && succ.count(c); c = succ.at(c))
-					if (++len > MAX_CASCADE || succ.at(c) == prev)
+					if (++len > max_cascade || succ.at(c) == prev)
 						ok = false;
 				if (!ok)
 					continue;
@@ -1827,9 +1828,8 @@ struct XilinxDspPass : public Pass {
 		log("connections (optionally, where 'P' is right-shifted by 17-bits and used as an\n");
 		log("input to the post-adder -- a pattern common for summing partial products to\n");
 		log("implement wide multipliers). Limited support also exists for similar cascading\n");
-		log("for A and B using '[AB]COUT' -> '[AB]CIN'. Currently, cascade chains are limited\n");
-		log("to a maximum length of 20 cells, corresponding to the smallest Xilinx 7 Series\n");
-		log("device.\n");
+		log("for A and B using '[AB]COUT' -> '[AB]CIN'. A chain longer than the -max_cascade\n");
+		log("limit is split into the fewest chains within the limit, of nearly equal length.\n");
 		log("\n");
 		log("This pass is a no-op if the scratchpad variable 'xilinx_dsp.multonly' is set\n");
 		log("to 1.\n");
@@ -1848,12 +1848,19 @@ struct XilinxDspPass : public Pass {
 		log("        select the family to target\n");
 		log("        default: xc7\n");
 		log("\n");
+		log("    -max_cascade <int>\n");
+		log("        maximum number of DSPs in one cascade chain; 1 disables cascading.\n");
+		log("        default: 72 for xcup, the shortest DSP column of the UltraScale+\n");
+		log("        devices (three clock regions); 20 otherwise, corresponding to the\n");
+		log("        smallest Xilinx 7 Series device\n");
+		log("\n");
 	}
 	void execute(std::vector<std::string> args, RTLIL::Design *design) override
 	{
 		log_header(design, "Executing XILINX_DSP pass (pack resources into DSPs).\n");
 
 		std::string family = "xc7";
+		int max_cascade = 0;
 		size_t argidx;
 		for (argidx = 1; argidx < args.size(); argidx++)
 		{
@@ -1861,9 +1868,18 @@ struct XilinxDspPass : public Pass {
 				family = args[++argidx];
 				continue;
 			}
+			if (args[argidx] == "-max_cascade" && argidx+1 < args.size()) {
+				max_cascade = atoi(args[++argidx].c_str());
+				if (max_cascade < 1)
+					log_cmd_error("-max_cascade must be at least 1.\n");
+				continue;
+			}
 			break;
 		}
 		extra_args(args, argidx, design);
+
+		if (max_cascade == 0)
+			max_cascade = family == "xcup" ? 72 : 20;
 
 		// Don't bother distinguishing between those.
 		if (family == "xc6v")
@@ -1920,12 +1936,13 @@ struct XilinxDspPass : public Pass {
 					xilinx_dsp_shift_heads(module, module->selected_cells());
 				}
 				xilinx_dsp_cascade_pm pm(module, module->selected_cells());
+				pm.ud_xilinx_dsp_cascade.max_cascade = max_cascade;
 				pm.run_xilinx_dsp_cascade();
 			}
 			// ACOUT -> ACIN cascades for delayed A inputs (e.g. FIR delay
 			// lines) that the PCOUT -> PCIN driven matcher above cannot see
 			if (family == "xcu")
-				xilinx_dsp_abcascade(module, module->selected_cells());
+				xilinx_dsp_abcascade(module, module->selected_cells(), max_cascade);
 		}
 	}
 } XilinxDspPass;

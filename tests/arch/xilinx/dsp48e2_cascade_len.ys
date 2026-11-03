@@ -1,0 +1,51 @@
+# DSP cascade chain length: a 24-tap systolic FIR is one cascade chain on xcup by default
+# (limit 72), with its sample and coefficient delay lines in the B and A cascades. With
+# -max_dsp_cascade 20 it is split into two chains of 12 (the second one is fed from fabric
+# delay lines), and -max_dsp_cascade 1 disables cascading.
+read_verilog <<EOT
+module fir24(input clk, input cload, input signed [17:0] cin, input signed [15:0] x, output signed [47:0] y);
+  localparam N = 24;
+  reg signed [17:0] c [0:N-1];
+  reg signed [15:0] xr [0:2*N-1];
+  reg signed [33:0] m [0:N-1];
+  reg signed [47:0] acc [0:N-1];
+  integer i;
+  always @(posedge clk) begin
+    if (cload) begin
+      c[0] <= cin;
+      for (i = 1; i < N; i = i + 1) c[i] <= c[i-1];
+    end
+    xr[0] <= x;
+    for (i = 1; i < 2*N; i = i + 1) xr[i] <= xr[i-1];
+    for (i = 0; i < N; i = i + 1) m[i] <= xr[2*i] * c[i];
+    acc[0] <= m[0];
+    for (i = 1; i < N; i = i + 1) acc[i] <= acc[i-1] + m[i];
+  end
+  assign y = acc[N-1];
+endmodule
+EOT
+design -save fir24
+
+synth_xilinx -family xcup -noiopad -noclkbuf
+select -assert-count 24 t:DSP48E2
+select -assert-count 23 t:DSP48E2 %co:+[PCOUT] t:DSP48E2 %d %co:+[PCIN] w:* %d t:DSP48E2 %i
+select -assert-count 22 t:DSP48E2 %co:+[ACOUT] t:DSP48E2 %d %co:+[ACIN] w:* %d t:DSP48E2 %i
+select -assert-count 23 t:DSP48E2 %co:+[BCOUT] t:DSP48E2 %d %co:+[BCIN] w:* %d t:DSP48E2 %i
+select -assert-none t:SRL* t:FD* t:LUT*
+
+design -load fir24
+synth_xilinx -family xcup -noiopad -noclkbuf -max_dsp_cascade 20
+select -assert-count 24 t:DSP48E2
+select -assert-count 22 t:DSP48E2 %co:+[PCOUT] t:DSP48E2 %d %co:+[PCIN] w:* %d t:DSP48E2 %i
+select -assert-min 1 t:SRL*
+
+design -load fir24
+synth_xilinx -family xcup -noiopad -noclkbuf -max_dsp_cascade 1
+select -assert-count 24 t:DSP48E2
+select -assert-none t:DSP48E2 %co:+[PCOUT] t:DSP48E2 %d %co:+[PCIN] w:* %d t:DSP48E2 %i
+select -assert-none t:DSP48E2 %co:+[ACOUT] t:DSP48E2 %d %co:+[ACIN] w:* %d t:DSP48E2 %i
+select -assert-none t:DSP48E2 %co:+[BCOUT] t:DSP48E2 %d %co:+[BCIN] w:* %d t:DSP48E2 %i
+
+design -load fir24
+logger -expect error "-max_dsp_cascade must be at least 1" 1
+synth_xilinx -family xcup -max_dsp_cascade 0

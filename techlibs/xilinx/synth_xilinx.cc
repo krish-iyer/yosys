@@ -108,6 +108,11 @@ struct SynthXilinxPass : public ScriptPass
 		log("    -nodsp\n");
 		log("        do not use DSP48*s to implement multipliers and associated logic\n");
 		log("\n");
+		log("    -max_dsp_cascade <int>\n");
+		log("        maximum number of DSPs in one [ABP]COUT -> [ABP]CIN cascade chain;\n");
+		log("        longer chains are split (see 'help xilinx_dsp')\n");
+		log("        default: 72 for xcup, 20 otherwise\n");
+		log("\n");
 		log("    -noiopad\n");
 		log("        disable I/O buffer insertion (useful for hierarchical or \n");
 		log("        out-of-context flows)\n");
@@ -149,6 +154,7 @@ struct SynthXilinxPass : public ScriptPass
 	bool dff;
 	bool flatten_before_abc;
 	int widemux;
+	int max_dsp_cascade;
 	int lut_size;
 	int widelut_size;
 
@@ -173,6 +179,7 @@ struct SynthXilinxPass : public ScriptPass
 		dff = false;
 		flatten_before_abc = false;
 		widemux = 0;
+		max_dsp_cascade = 0;
 		lut_size = 6;
 	}
 
@@ -262,6 +269,12 @@ struct SynthXilinxPass : public ScriptPass
 			}
 			if (args[argidx] == "-widemux" && argidx+1 < args.size()) {
 				widemux = atoi(args[++argidx].c_str());
+				continue;
+			}
+			if (args[argidx] == "-max_dsp_cascade" && argidx+1 < args.size()) {
+				max_dsp_cascade = atoi(args[++argidx].c_str());
+				if (max_dsp_cascade < 1)
+					log_cmd_error("-max_dsp_cascade must be at least 1.\n");
 				continue;
 			}
 			if (args[argidx] == "-abc9") {
@@ -457,9 +470,9 @@ struct SynthXilinxPass : public ScriptPass
 				// fully absorbed into the DSP (MREG/PREG)
 				run("wreduce t:$dff t:$dffe t:$sdff t:$sdffe");
 				if (help_mode)
-					run("xilinx_dsp -family <family>");
+					run("xilinx_dsp -family <family> [-max_cascade <int>]", "(option for '-max_dsp_cascade')");
 				else
-					run("xilinx_dsp -family " + family);
+					run("xilinx_dsp -family " + family + (max_dsp_cascade > 0 ? stringf(" -max_cascade %d", max_dsp_cascade) : ""));
 				run("chtype -set $mul t:$__soft_mul");
 			}
 		}
