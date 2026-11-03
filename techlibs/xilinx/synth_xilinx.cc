@@ -618,6 +618,10 @@ struct SynthXilinxPass : public ScriptPass
 			if (!nocarry) {
 				techmap_args += " -map +/xilinx/arith_map.v";
 			}
+			if (help_mode)
+				run("xilinx_ternary", "(for -family xcu/xcup, skip if '-nocarry')");
+			else if (!nocarry && (family == "xcu" || family == "xcup"))
+				run("xilinx_ternary");
 			run("techmap " + techmap_args);
 			run("opt -fast");
 		}

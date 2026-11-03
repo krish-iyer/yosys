@@ -1,6 +1,9 @@
 yosys_pass(xilinx_dffopt
 	xilinx_dffopt.cc
 )
+yosys_pass(xilinx_ternary
+	xilinx_ternary.cc
+)
 yosys_pass(xilinx_widemul
 	xilinx_widemul.cc
 )
@@ -78,6 +81,7 @@ yosys_pass(synth_xilinx
 		xilinx_dffopt
 		xilinx_dsp
 		xilinx_srl
+		xilinx_ternary
 		xilinx_widemul
 		zinit
 	DATA_DIR

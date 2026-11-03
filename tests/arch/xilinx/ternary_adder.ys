@@ -1,0 +1,125 @@
+# Sums of three or more addends on UltraScale+: xilinx_ternary maps them to
+# ternary adders, one LUT6_2 per bit (the carry-save bit on O5, the sum bit
+# on O6) feeding a carry chain. Equivalence is checked against the cells_sim
+# models.
+
+read_verilog <<EOT
+module add3(input [15:0] a, b, c, output [15:0] y);
+  assign y = a + b + c;
+endmodule
+
+module add3_sub(input signed [11:0] a, b, c, output signed [13:0] y);
+  assign y = a + b - c;
+endmodule
+
+module sub3(input signed [11:0] a, b, c, output signed [13:0] y);
+  assign y = a - b - c;
+endmodule
+
+module add3_const_cin(input [11:0] a, b, input ci, output [12:0] y);
+  assign y = a + b + 12'h5a3 + ci;
+endmodule
+
+module add3_shift(input [11:0] a, input [7:0] b, input [5:0] c, output [16:0] y);
+  assign y = a + (b << 4) + (c << 9);
+endmodule
+
+module add4(input signed [11:0] a, b, c, d, output signed [13:0] y);
+  assign y = a + b + c + d;
+endmodule
+
+module add5(input [9:0] a, b, c, d, e, output [12:0] y);
+  assign y = a + b + c + d + e;
+endmodule
+EOT
+design -save read
+
+# 16 bits: one LUT6_2 per bit, the top bit needs no carry-save output
+design -load read
+hierarchy -top add3
+proc
+equiv_opt -assert -map +/xilinx/cells_sim.v synth_xilinx -family xcup -noiopad
+design -load postopt
+cd add3
+select -assert-count 15 t:LUT6_2
+select -assert-count 1 t:LUT4
+select -assert-count 4 t:CARRY4
+select -assert-none t:LUT6_2 t:LUT4 t:CARRY4 %% t:* %D
+
+# the +1 of the subtracted addend goes into the LUT of bit 0
+design -load read
+hierarchy -top add3_sub
+proc
+equiv_opt -assert -map +/xilinx/cells_sim.v synth_xilinx -family xcup -noiopad
+design -load postopt
+cd add3_sub
+select -assert-count 13 t:LUT6_2
+select -assert-count 1 t:LUT4
+select -assert-count 4 t:CARRY4
+select -assert-none t:LUT6_2 t:LUT4 t:CARRY4 %% t:* %D
+
+# two +1s: the carry chain starts at bit 1 with a carry-in
+design -load read
+hierarchy -top sub3
+proc
+equiv_opt -assert -map +/xilinx/cells_sim.v synth_xilinx -family xcup -noiopad
+design -load postopt
+cd sub3
+select -assert-count 13 t:LUT6_2
+select -assert-max 1 t:INV
+select -assert-count 4 t:CARRY4
+
+# a constant addend is folded into the LUTs, a single-bit addend is the carry-in
+design -load read
+hierarchy -top add3_const_cin
+proc
+equiv_opt -assert -map +/xilinx/cells_sim.v synth_xilinx -family xcup -noiopad
+design -load postopt
+cd add3_const_cin
+select -assert-count 12 t:LUT6_2
+select -assert-count 4 t:CARRY4
+select -assert-none t:LUT6_2 t:CARRY4 %% t:* %D
+
+# no adder below the lowest bit with two addends
+design -load read
+hierarchy -top add3_shift
+proc
+equiv_opt -assert -map +/xilinx/cells_sim.v synth_xilinx -family xcup -noiopad
+design -load postopt
+cd add3_shift
+select -assert-count 8 t:LUT6_2
+select -assert-count 1 t:LUT2
+select -assert-count 3 t:CARRY4
+select -assert-none t:LUT6_2 t:LUT2 t:CARRY4 %% t:* %D
+
+# four aligned addends: a row of full adders, then one ternary adder (a single carry chain)
+design -load read
+hierarchy -top add4
+proc
+equiv_opt -assert -map +/xilinx/cells_sim.v synth_xilinx -family xcup -noiopad
+design -load postopt
+cd add4
+select -assert-count 26 t:LUT6_2
+select -assert-count 1 t:LUT6
+select -assert-count 4 t:CARRY4
+
+# five addends: two ternary adders
+design -load read
+hierarchy -top add5
+proc
+equiv_opt -assert -map +/xilinx/cells_sim.v synth_xilinx -family xcup -noiopad
+design -load postopt
+cd add5
+select -assert-count 20 t:LUT6_2
+select -assert-count 1 t:LUT2
+select -assert-count 6 t:CARRY4
+
+# the pass itself
+design -load read
+hierarchy -top add3
+proc
+alumacc
+xilinx_ternary
+select -assert-none t:$macc t:$macc_v2
+select -assert-count 15 t:LUT6_2
+select -assert-count 4 t:CARRY4
